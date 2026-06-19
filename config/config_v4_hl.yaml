@@ -36,7 +36,7 @@ pairs:
     rsi_oversold: 20.0
     rsi_overbought: 80.0
     sl_pct: 0.06
-    tp_rr: 1.75               # TP 1.75R = 10.5% notional (software-only pe HL)
+    tp_rr: 1.75               # TP 1.75R = 10.5% notional (atomic HL trigger order)
     max_bars_in_trade: 40     # Time exit ~6.6 zile la 4h
     risk_pct_per_trade: 0.10
 

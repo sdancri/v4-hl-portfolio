@@ -1258,7 +1258,7 @@ async def set_position_sl(symbol:     str,
             sl_str = _fmt_price(sl_price, coin)
             qty_str = _fmt_qty(pos["qty"], coin)
 
-            order_wire = {
+            sl_order_wire = {
                 "a": meta["asset_id"],
                 "b": is_buy_sl,
                 "p": sl_str,
@@ -1266,19 +1266,51 @@ async def set_position_sl(symbol:     str,
                 "r": True,
                 "t": {"trigger": {"isMarket": True, "triggerPx": sl_str, "tpsl": "sl"}},
             }
-            action = {"type": "order", "orders": [order_wire], "grouping": "na"}
+
+            # V4_HL: atomic TP trigger order (mirror V4 Bybit).
+            # HL accepta acelasi API ca SL, doar tpsl="tp" + price diferit. TP
+            # foloseste ACELASI side ca SL (reduce-only, inchide pozitia) → is_buy_sl.
+            # Plasam ambele ordere intr-o singura tranzactie ca sa fie atomic in
+            # acelasi sign+post call.
+            orders_list = [sl_order_wire]
+            if tp_price is not None and tp_price > 0:
+                tp_str = _fmt_price(tp_price, coin)
+                tp_order_wire = {
+                    "a": meta["asset_id"],
+                    "b": is_buy_sl,           # acelasi side (reduce-only inchide pozitia)
+                    "p": tp_str,
+                    "s": qty_str,
+                    "r": True,
+                    "t": {"trigger": {"isMarket": True, "triggerPx": tp_str, "tpsl": "tp"}},
+                }
+                orders_list.append(tp_order_wire)
+
+            action = {"type": "order", "orders": orders_list, "grouping": "na"}
 
             resp = await _sign_and_post(action)
             statuses = resp.get("response", {}).get("data", {}).get("statuses", [])
-            if statuses and "error" in statuses[0]:
-                last_err = statuses[0]["error"]
+            # SL status = statuses[0]. TP status (daca tp_price dat) = statuses[1].
+            sl_status = statuses[0] if statuses else {}
+            if isinstance(sl_status, dict) and "error" in sl_status:
+                last_err = sl_status["error"]
                 # Idempotent NO-OP: SL already at this price (retry pe acelasi
                 # value). HL respinge dar functional e succes.
                 if _is_sl_noop_error(last_err):
                     print(f"[HL] set_position_sl NO-OP (already set): {last_err}")
+                    # Check TP status too daca avem
+                    if len(statuses) > 1 and isinstance(statuses[1], dict):
+                        tp_st = statuses[1]
+                        if "error" in tp_st and not _is_sl_noop_error(tp_st["error"]):
+                            print(f"[HL] TP not set (SL ok): {tp_st['error']}")
                     return True
                 print(f"[HL] set_position_sl FAIL #{attempt}/{len(backoff)}: {last_err}")
                 continue
+            # SL OK. Verifica si TP daca am incercat (statuses[1]).
+            # TP failure NU blocheaza succesul — SL e critica safety, TP e profit.
+            if len(statuses) > 1 and isinstance(statuses[1], dict) and "error" in statuses[1]:
+                tp_err = statuses[1]["error"]
+                if not _is_sl_noop_error(tp_err):
+                    print(f"[HL] TP not set (SL ok pe {symbol}): {tp_err}")
             return True
         except Exception as e:
             last_err = repr(e)

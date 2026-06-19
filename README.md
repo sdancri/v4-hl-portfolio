@@ -16,8 +16,8 @@ Variant Hyperliquid al [V4 Portfolio Bot](https://github.com/sdancri/v4-portfoli
 |---|---|---|
 | **Auth** | API key + secret HMAC | Wallet EIP-712 (`HL_MAIN_ADDRESS` + `HL_AGENT_PRIVATE_KEY`) |
 | **Simbol** | `BTCUSDT` | `BTC` |
-| **TP** | atomic Bybit Market | **software-only** (intra-bar high/low check pe pozitia activa) |
-| **SL** | atomic Bybit Market | trigger reduce-only (`tpsl=sl`) — Bybit-side |
+| **TP** | atomic Bybit Market | atomic HL trigger order (`tpsl="tp"`, reduce-only) |
+| **SL** | atomic Bybit Market | atomic HL trigger order (`tpsl="sl"`, reduce-only) |
 | **Klines** | REST + WS dual stream | WS multiplexat (candle + orderUpdates + userEvents) |
 | **Auth expira** | nu | **agent key EXPIRA la 180 zile** → monitor |
 | **Taker fee** | 0.055% | 0.045% |
@@ -79,7 +79,7 @@ Apoi in Portainer Stack:
 
 ### Limitari curente (vs V4 Bybit)
 
-- ⚠️ **TP software-only**: HL n-are atomic TP server-side. Strategia detecteaza intra-bar TP hit (high≥tp pe LONG, low≤tp pe SHORT) si trimite close prin `close_position`. Latenta: max 1 tick de WS. Pe TF 4h, irelevant.
+- ✅ **TP atomic** (V4_HL extinde BP-HL): `set_position_sl(sl_price, tp_price)` plaseaza AMBELE trigger orders intr-o singura tranzactie semnata (SL `tpsl="sl"` + TP `tpsl="tp"`, ambele reduce-only). Paritate completa cu V4 Bybit `setTradingStop`. Cost: +1 ordin in payload, zero call API extra.
 - ⚠️ **Agent expiration**: cheia agent HL expira la **180 zile**. Bot-ul **nu monitorizeaza** asta automat momentan. Foloseste `ex.fetch_agent_expiration_ms()` periodic — recomandare TODO: alerta Telegram cu 14 zile inainte.
 - ⚠️ **HL leverage UI**: la primul boot, V4_HL apeleaza `set_leverage(symbol, 5)` per pereche. Verifica in HL UI ca s-a aplicat. Daca nu, seteaza manual in HL Settings.
 
