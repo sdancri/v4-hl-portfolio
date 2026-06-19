@@ -1,0 +1,391 @@
+"""
+smoke_test.py — Verificari sanity rapide pe Ichimoku2.
+
+Ruleaza: python scripts/smoke_test.py
+
+Testeaza:
+  1. Toate modulele importeaza fara erori
+  2. Configurile Ichi1/Ichi2 incarca corect
+  3. PairStrategyConfig + IchimokuSignal instantiaza
+  4. warm_up + evaluate lucreaza pe date simulate
+  5. position_sizing calculeaza corect
+  6. exchange_api functii exista
+  7. bot_state operatii (LivePosition, TradeRecord, equity update)
+  8. no_lookahead filter
+  9. telegram_bot fmt_time
+  10. private_ws auth signing
+
+NU face apeluri reale catre Bybit. Verifica doar structura codului.
+"""
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import numpy as np
+import pandas as pd
+
+
+PASS = 0
+FAIL = 0
+errors = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> None:
+    global PASS, FAIL
+    if cond:
+        PASS += 1
+        print(f"  ✓ {name}")
+    else:
+        FAIL += 1
+        print(f"  ✗ {name}  — {detail}")
+        errors.append((name, detail))
+
+
+def section(title: str) -> None:
+    print(f"\n{'─' * 60}\n  {title}\n{'─' * 60}")
+
+
+# ============================================================================
+# 1. Imports
+# ============================================================================
+section("1. Imports")
+
+try:
+    from core import exchange_api as ex
+    check("core.exchange_api", True)
+except Exception as e:
+    check("core.exchange_api", False, repr(e))
+
+try:
+    from core import rate_limiter as rl
+    check("core.rate_limiter", True)
+except Exception as e:
+    check("core.rate_limiter", False, repr(e))
+
+try:
+    from core import no_lookahead as nl
+    check("core.no_lookahead", True)
+except Exception as e:
+    check("core.no_lookahead", False, repr(e))
+
+try:
+    from core import bot_state
+    from core.bot_state import BotState, LivePosition, TradeRecord, ReconciliationError
+    check("core.bot_state", True)
+except Exception as e:
+    check("core.bot_state", False, repr(e))
+
+try:
+    from core import hl_ws_runner
+    check("core.hl_ws_runner", True)
+except Exception as e:
+    check("core.hl_ws_runner", False, repr(e))
+
+try:
+    from core import telegram_bot as tg
+    check("core.telegram_bot", True)
+except Exception as e:
+    check("core.telegram_bot", False, repr(e))
+
+try:
+    from core.config import AppConfig, PairConfig, load_config
+    check("core.config", True)
+except Exception as e:
+    check("core.config", False, repr(e))
+
+try:
+    from core.position_sizing import compute_position_size, compute_qty
+    check("core.position_sizing", True)
+except Exception as e:
+    check("core.position_sizing", False, repr(e))
+
+try:
+    from strategies.ichimoku_signal import IchimokuSignal, PairStrategyConfig, SignalDecision
+    check("strategies.ichimoku_signal", True)
+except Exception as e:
+    check("strategies.ichimoku_signal", False, repr(e))
+
+# ============================================================================
+# 2. Config loading
+# ============================================================================
+section("2. Config loading (Ichi1 + Ichi2)")
+
+try:
+    cfg1 = load_config(str(ROOT / "config" / "config_ichi1.yaml"))
+    enabled1 = [p.symbol for p in cfg1.pairs if p.enabled]
+    check("config_ichi1.yaml loads", True)
+    check("Ichi1 has SUN+MNT+ILV", set(enabled1) == {"SUNUSDT", "MNTUSDT", "ILVUSDT"},
+          detail=f"got {enabled1}")
+    check("Ichi1 leverage_max=12", cfg1.portfolio.leverage_max == 12,
+          detail=f"got {cfg1.portfolio.leverage_max}")
+    check("Ichi1 pool_total=100", cfg1.portfolio.pool_total == 100.0)
+except Exception as e:
+    check("Ichi1 config", False, repr(e))
+
+try:
+    cfg2 = load_config(str(ROOT / "config" / "config_ichi2.yaml"))
+    enabled2 = [p.symbol for p in cfg2.pairs if p.enabled]
+    check("config_ichi2.yaml loads", True)
+    check("Ichi2 has AERO+RSR+AKT", set(enabled2) == {"AEROUSDT", "RSRUSDT", "AKTUSDT"},
+          detail=f"got {enabled2}")
+    check("Ichi2 leverage_max=12", cfg2.portfolio.leverage_max == 12)
+except Exception as e:
+    check("Ichi2 config", False, repr(e))
+
+# ============================================================================
+# 3. Strategy: PairStrategyConfig + IchimokuSignal
+# ============================================================================
+section("3. Strategy")
+
+try:
+    pcfg = PairStrategyConfig(
+        symbol="MNTUSDT", timeframe="4h",
+        hull_length=10, tenkan_periods=9, kijun_periods=48,
+        senkou_b_periods=52, displacement=24,
+        risk_pct_per_trade=0.07, sl_initial_pct=0.04, tp_pct=0.05,
+    )
+    check("PairStrategyConfig MNT", pcfg.symbol == "MNTUSDT")
+    check("min_history_bars >= 76",
+          pcfg.min_history_bars >= max(10, 48, 52, 24) + 1,
+          detail=f"got {pcfg.min_history_bars}")
+except Exception as e:
+    check("PairStrategyConfig", False, repr(e))
+
+try:
+    sig = IchimokuSignal(pcfg)
+    check("IchimokuSignal init", sig.cfg.symbol == "MNTUSDT")
+
+    # Warm-up cu 200 bare random (placeholder — fara semnale reale)
+    n = 200
+    rng = np.random.default_rng(42)
+    prices = 1.0 + np.cumsum(rng.normal(0, 0.005, n))
+    df = pd.DataFrame({
+        "open": prices, "high": prices * 1.01, "low": prices * 0.99,
+        "close": prices, "volume": 100.0,
+    }, index=pd.date_range("2026-01-01", periods=n, freq="4h", tz="UTC"))
+
+    sig.warm_up(df)
+    check("warm_up no crash", True)
+    check("indicators ready",
+          sig._last_idx_valid(),
+          detail=f"cache={sig.cache is not None}")
+
+    # Evaluate (no position)
+    decision = sig.evaluate(has_position=None, entry_price=0.0)
+    check("evaluate returns SignalDecision",
+          decision.action in {"OPEN_LONG", "OPEN_SHORT", "HOLD"},
+          detail=f"got {decision.action}")
+
+    # Update buffer + re-eval
+    sig.update_buffer({
+        "ts_ms": int(df.index[-1].timestamp() * 1000) + 4 * 3600 * 1000,
+        "open": prices[-1], "high": prices[-1] * 1.01,
+        "low": prices[-1] * 0.99, "close": prices[-1] * 1.005, "volume": 100.0,
+    })
+    sig.recompute_indicators()
+    check("update_buffer + recompute", sig._last_idx_valid())
+except Exception as e:
+    check("IchimokuSignal flow", False, repr(e))
+
+# ============================================================================
+# 4. Position sizing
+# ============================================================================
+section("4. Position sizing")
+
+try:
+    pair_cfg = cfg1.pairs[0]  # SUNUSDT
+    sizing = compute_position_size(pair_cfg, shared_equity=100.0,
+                                    balance_broker=100.0,
+                                    portfolio_cfg=cfg1.portfolio,
+                                    leverage=pair_cfg.leverage)
+    expected_pos_usd = (100.0 * pair_cfg.risk_pct_per_trade) / pair_cfg.sl_initial_pct
+    cap_usd = cfg1.portfolio.cap_pct_of_max * 100.0 * cfg1.portfolio.leverage_max
+    # pos_usd should be at most expected_pos_usd; if > cap_usd, sizing.skip=True
+    if sizing.skip:
+        check("position_sizing skip flag", sizing.pos_usd > cap_usd,
+              detail=f"skip={sizing.skip_reason}")
+    else:
+        check("compute_position_size pos_usd",
+              abs(sizing.pos_usd - expected_pos_usd) < 0.01,
+              detail=f"got {sizing.pos_usd:.2f} expected {expected_pos_usd:.2f}")
+    check("risk_usd = 7%",
+          abs(sizing.risk_usd - 7.0) < 0.01,
+          detail=f"got {sizing.risk_usd:.2f}")
+    check("cap_usd = $1,140 (0.95*100*12)",
+          abs(sizing.cap_usd - 1140.0) < 0.01,
+          detail=f"got {sizing.cap_usd:.2f}")
+except Exception as e:
+    check("position_sizing", False, repr(e))
+
+# ============================================================================
+# 5. Exchange API surface (without real calls)
+# ============================================================================
+section("5. exchange_api surface")
+
+required = [
+    "get_ticker", "get_kline", "get_market_info", "get_balance", "get_position",
+    "place_market", "place_limit_postonly", "cancel_order", "cancel_all",
+    "get_open_orders", "get_order_status", "set_leverage", "set_position_sl",
+    "fetch_closed_pnl", "fetch_pnl_for_trade",
+    "_sign", "_post", "_get", "round_qty_down",
+]
+missing = [f for f in required if not hasattr(ex, f)]
+check(f"19 functii core ({len(required)} required)",
+      len(missing) == 0,
+      detail=f"missing: {missing}")
+
+# Test signing (HMAC corectness — known input/output deterministic)
+try:
+    sig_hdrs = ex._sign("test_key", "test_secret", '{"a":1}')
+    check("_sign returns headers",
+          all(k in sig_hdrs for k in ["X-BAPI-API-KEY", "X-BAPI-TIMESTAMP",
+                                        "X-BAPI-SIGN", "X-BAPI-RECV-WINDOW",
+                                        "Content-Type"]))
+except Exception as e:
+    check("_sign", False, repr(e))
+
+# round_qty_down
+check("round_qty_down(0.567, 0.01) == 0.56",
+      abs(ex.round_qty_down(0.567, 0.01) - 0.56) < 1e-9)
+check("round_qty_down(123.45, 1.0) == 123.0",
+      abs(ex.round_qty_down(123.45, 1.0) - 123.0) < 1e-9)
+check("round_qty_down(0.0, anything) == 0.0",
+      ex.round_qty_down(0.0, 0.01) == 0.0)
+
+# ============================================================================
+# 6. BotState
+# ============================================================================
+section("6. BotState")
+
+try:
+    state = BotState(account_size=1000.0)
+    check("init equity = 1000", state.shared_equity == 1000.0)
+    check("init n_open=0", state.n_open_positions() == 0)
+
+    pos = LivePosition(
+        symbol="MNTUSDT", side="Buy", direction="LONG",
+        qty=100.0, entry_price=1.0, sl_price=0.96, tp_price=1.05,
+        leverage=12, pos_usd=100.0, risk_usd=4.0, opened_ts_ms=1000,
+    )
+    state.set_position("MNTUSDT", pos)
+    check("set_position", state.n_open_positions() == 1)
+    check("get_position", state.get_position("MNTUSDT") is pos)
+
+    trade = TradeRecord(
+        id=0, symbol="MNT", direction="LONG",
+        entry_ts_ms=1000, entry_price=1.0,
+        sl_price=0.96, tp_price=1.05, qty=100.0,
+        exit_ts_ms=2000, exit_price=1.05, exit_price_target=1.05,
+        exit_reason="HL_TP", pnl=4.95, fees=0.05,
+    )
+    state.record_closed_trade(trade)
+    # Modelul Ichimoku: record_closed_trade NU muta shared_equity local —
+    # caller-ul (main.py) face sync_equity dupa, care OVERWRITE din Bybit.
+    check("record_closed_trade NU modifica shared_equity local",
+          state.shared_equity == 1000.0,
+          detail=f"got {state.shared_equity} (expected 1000 — sync_equity face update real)")
+    check("position cleared after close", state.n_open_positions() == 0)
+    check("trade in history", len(state.trades) == 1)
+
+    # Slippage calc
+    check("trade.slippage = 0", trade.slippage == 0.0)
+
+    # to_dict / to_persist round-trip
+    persisted = trade.to_persist()
+    rebuilt = TradeRecord.from_dict(persisted)
+    check("TradeRecord persist round-trip",
+          rebuilt.pnl == trade.pnl and rebuilt.symbol == trade.symbol)
+
+    # Summary
+    summary = state.summary()
+    check("summary has return_pct",
+          "return_pct" in summary and summary["n_trades"] == 1)
+except Exception as e:
+    check("BotState flow", False, repr(e))
+
+# ============================================================================
+# 7. no_lookahead
+# ============================================================================
+section("7. no_lookahead")
+
+try:
+    check("tf_to_interval 4h", nl.tf_to_interval("4h") == "240")
+    check("tf_to_interval 1h", nl.tf_to_interval("1h") == "60")
+
+    # Filter: 2 bare 4h, ultima e bara curenta
+    now_ms = 1_000_000_000_000
+    cutoff = (now_ms // 14_400_000) * 14_400_000
+    prev_bar = cutoff - 14_400_000
+    bars = [[prev_bar, 1, 1, 1, 1, 1, 1], [cutoff, 2, 2, 2, 2, 2, 2]]
+    out = nl.filter_closed_bars(bars, "240", now_ms=now_ms)
+    check("filter_closed_bars excludes current",
+          len(out) == 1 and out[0][0] == prev_bar)
+except Exception as e:
+    check("no_lookahead", False, repr(e))
+
+# ============================================================================
+# 8. telegram_bot
+# ============================================================================
+section("8. telegram_bot")
+
+try:
+    formatted = tg.fmt_time(1700000000)  # 14 nov 2023 22:13 UTC
+    check("fmt_time produces string",
+          isinstance(formatted, str) and len(formatted) > 10,
+          detail=f"got {formatted!r}")
+    # send-uri reale skip — nu avem TOKEN setat
+    check("send is async callable", callable(tg.send))
+    check("send_critical is async callable", callable(tg.send_critical))
+except Exception as e:
+    check("telegram_bot", False, repr(e))
+
+# ============================================================================
+# 9. HL WS runner
+# ============================================================================
+section("9. hl_ws_runner")
+
+try:
+    check("public_ws_loop_hl exists",
+          hasattr(hl_ws_runner, "public_ws_loop_hl"))
+    check("private_ws_loop_hl exists",
+          hasattr(hl_ws_runner, "private_ws_loop_hl"))
+except Exception as e:
+    check("hl_ws_runner", False, repr(e))
+
+# ============================================================================
+# 10. main.py (full import — bootstrap nu ruleaza pana FastAPI start)
+# ============================================================================
+section("10. main.py")
+
+try:
+    import os
+    os.environ["CONFIG_FILE"] = str(ROOT / "config" / "config_ichi1.yaml")
+    # Reimport main daca a fost incarcat anterior
+    if "main" in sys.modules:
+        del sys.modules["main"]
+    import main
+    check("main.py imports", True)
+    check("CONFIG.pairs loaded",
+          len([p for p in main.CONFIG.pairs if p.enabled]) == 3)
+    check("FastAPI app constructed",
+          main.app is not None and main.app.title.startswith("ichi"))
+except Exception as e:
+    check("main.py", False, repr(e))
+
+# ============================================================================
+# Summary
+# ============================================================================
+print(f"\n{'═' * 60}")
+print(f"  RESULTS: {PASS} passed  /  {FAIL} failed")
+print(f"{'═' * 60}")
+if FAIL:
+    print("\nFailed tests:")
+    for name, detail in errors:
+        print(f"  • {name}: {detail}")
+    sys.exit(1)
+print("\n✓ All smoke tests passed.")

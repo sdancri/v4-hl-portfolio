@@ -1,0 +1,83 @@
+# V4_HL portfolio bot — multi-strategy pe Hyperliquid (mirror V4 Bybit)
+#
+# Strategii (identice cu V4 Bybit):
+#   BTC  bb_mr — Bollinger Bands Mean Reversion
+#   TIA  hi    — Hull MA + Ichimoku Cloud (trend follow)
+#   NEAR hi    — Hull MA + Ichimoku Cloud (trend follow)
+#
+# Diferente fata de V4 Bybit:
+#   - Simbol: "BTC" (NU "BTCUSDT") — HL foloseste doar coin
+#   - TP: software-only (HL n-are atomic TP). SL ramane Bybit-side via
+#     trigger order reduce-only (tpsl=sl).
+#   - Auth: wallet EIP-712 (HL_MAIN_ADDRESS + HL_AGENT_PRIVATE_KEY) —
+#     agent key EXPIRA la 180 zile, monitor.
+#
+# Reset profit MANUAL la $5K (acelasi cycle ca V4 Bybit).
+
+portfolio:
+  name: v4_hl_portfolio
+  pool_total: 100.0           # capital initial USDC (compound de aici)
+  leverage: 5                 # HL default isolated (HL leverage max 50x pt BTC/ETH)
+  leverage_max: 5             # SAFETY cap intern: pos_notional ≤ 5× equity
+  cap_pct_of_max: 0.95
+  taker_fee: 0.00045          # 0.045% taker HL (mai mic decat Bybit 0.055%)
+  slippage_bps: 0.0
+
+pairs:
+  # === BTC — Bollinger Bands Mean Reversion ===
+  - symbol: BTC
+    timeframe: 4h
+    enabled: true
+    strategy: bb_mr
+    leverage: 5
+    bb_length: 26
+    bb_std: 3.0
+    rsi_length: 14
+    rsi_oversold: 20.0
+    rsi_overbought: 80.0
+    sl_pct: 0.06
+    tp_rr: 1.75               # TP 1.75R = 10.5% notional (software-only pe HL)
+    max_bars_in_trade: 40     # Time exit ~6.6 zile la 4h
+    risk_pct_per_trade: 0.10
+
+  # === TIA — Hull+Ichimoku ===
+  - symbol: TIA
+    timeframe: 4h
+    enabled: true
+    strategy: hi
+    leverage: 5
+    hull_length: 12
+    tenkan_periods: 9
+    kijun_periods: 60
+    senkou_b_periods: 52
+    displacement: 24
+    risk_pct_per_trade: 0.10
+    sl_initial_pct: 0.05
+    tp_pct: null              # NO TP — signal exit only
+    max_hull_spread_pct: 2.0
+    max_close_kijun_dist_pct: 6.0
+
+  # === NEAR — Hull+Ichimoku (diversifier) ===
+  - symbol: NEAR
+    timeframe: 4h
+    enabled: true
+    strategy: hi
+    leverage: 5
+    hull_length: 24
+    tenkan_periods: 9
+    kijun_periods: 48
+    senkou_b_periods: 40
+    displacement: 24
+    risk_pct_per_trade: 0.10
+    sl_initial_pct: 0.05
+    tp_pct: null
+    max_hull_spread_pct: 2.0
+    max_close_kijun_dist_pct: 6.0
+
+operational:
+  max_concurrent_positions: 3
+  max_consecutive_api_errors: 5
+  heartbeat_interval_seconds: 60
+  save_state_interval_seconds: 300
+  state_dir: ./state
+  log_dir: ./logs

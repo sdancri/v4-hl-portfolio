@@ -1,0 +1,15 @@
+# Framework deps (copy from BP requirements.txt — keep in sync manual)
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+websockets==14.2
+httpx>=0.27.0
+pandas==2.2.3
+numpy==2.2.4
+requests==2.32.3
+psutil>=5.9
+pytz>=2023.3
+
+# HL-specific (Hyperliquid EIP-712 signing)
+hyperliquid-python-sdk>=0.16.0
+eth-account>=0.13.0
+pyyaml>=6.0

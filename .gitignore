@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.env
+logs/
+state/
+*.parquet
+trades_setup_target5k.csv
+replay_trades.csv
+.claude/
+.vscode/
+*.code-workspace
+!V4_PORTFOLIO.code-workspace
+*.log

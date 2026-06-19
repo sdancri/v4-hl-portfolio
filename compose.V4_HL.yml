@@ -1,0 +1,68 @@
+# V4_HL portfolio bot — multi-strategy pe Hyperliquid (mirror V4 Bybit)
+#
+# Perechi (3, shared equity pool, compound):
+#   BTC  — strategy: bb_mr  (Bollinger Bands Mean Reversion)
+#   TIA  — strategy: hi     (Hull MA + Ichimoku Cloud, trend follow)
+#   NEAR — strategy: hi     (Hull MA + Ichimoku Cloud, trend follow)
+#
+# Host port 8204 → container 8204. Subaccount HL: V4_HL (wallet separat).
+# Auth: HL_MAIN_ADDRESS + HL_AGENT_PRIVATE_KEY (agent EXPIRA la 180 zile!).
+# Reset profit MANUAL la $5K (acelasi cycle ca V4 Bybit).
+
+services:
+  V4_HL:
+    image: sdancri/v4_hl_portfolio:latest
+    pull_policy: always
+    container_name: V4_HL
+    restart: unless-stopped
+    environment:
+      - CONFIG_FILE=config/config_v4_hl.yaml
+      - HL_MAIN_ADDRESS=${HL_MAIN_ADDRESS}
+      - HL_AGENT_PRIVATE_KEY=${HL_AGENT_PRIVATE_KEY}
+      - HL_TESTNET=${HL_TESTNET:-0}
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+      - TZ=Europe/Bucharest
+      - CHART_TZ=${CHART_TZ:-Europe/Bucharest}
+      - BOT_NAME=V4_HL
+      - BOT_VERSION=${BOT_VERSION:-}
+      - STRATEGY_NAME=BB-MR + Hull+Ichimoku (HL)
+      - CHART_PORT=8204
+      - CHART_HOST_PORT=8204
+      - DATA_DIR=/app/data
+      - RESET_TOKEN=${RESET_TOKEN:-}
+      - RATE_LIMIT_PER_SEC=${RATE_LIMIT_PER_SEC:-5}
+      - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-10}
+      - WS_ZOMBIE_TIMEOUT=${WS_ZOMBIE_TIMEOUT:-90}
+      - MEM_MON_INTERVAL_SEC=${MEM_MON_INTERVAL_SEC:-300}
+      - MEM_MON_RSS_ALERT_MB=${MEM_MON_RSS_ALERT_MB:-320}
+      # Dashboard control (acelasi setup ca V4 Bybit; partajeaza state.db)
+      - BOT_CONTROL_URL=${BOT_CONTROL_URL:-http://V4_HL:8204}
+      - BOT_REPORTER_DB=${BOT_REPORTER_DB:-/dashboard/state.db}
+      - BOT_REPORTER_HEARTBEAT_SEC=${BOT_REPORTER_HEARTBEAT_SEC:-30}
+      - TAKER_FEE_RATE=${TAKER_FEE_RATE:-0.00045}
+    ports:
+      - "8204:8204"
+    volumes:
+      - /srv/bots/V4_HL/logs:/app/logs
+      - /srv/bots/V4_HL/data:/app/data
+      - /srv/bots/dashboard:/dashboard
+    networks:
+      - bots
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8204/api/status || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+    mem_limit: 384m
+    memswap_limit: 512m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  bots:
+    external: true
