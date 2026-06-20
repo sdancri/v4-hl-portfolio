@@ -80,7 +80,7 @@ Apoi in Portainer Stack:
 ### Limitari curente (vs V4 Bybit)
 
 - ✅ **TP atomic** (V4_HL extinde BP-HL): `set_position_sl(sl_price, tp_price)` plaseaza AMBELE trigger orders intr-o singura tranzactie semnata (SL `tpsl="sl"` + TP `tpsl="tp"`, ambele reduce-only). Paritate completa cu V4 Bybit `setTradingStop`. Cost: +1 ordin in payload, zero call API extra.
-- ⚠️ **Agent expiration**: cheia agent HL expira la **180 zile**. Bot-ul **nu monitorizeaza** asta automat momentan. Foloseste `ex.fetch_agent_expiration_ms()` periodic — recomandare TODO: alerta Telegram cu 14 zile inainte.
+- ✅ **Agent expiration monitor**: V4_HL verifica la 12h `ex.fetch_agent_expiration_ms()`. Alerta progresiva Telegram la 14d / 7d / 3d / 1d ramase. Env: `AGENT_EXP_CHECK_HOURS=12` (default).
 - ⚠️ **HL leverage UI**: la primul boot, V4_HL apeleaza `set_leverage(symbol, 5)` per pereche. Verifica in HL UI ca s-a aplicat. Daca nu, seteaza manual in HL Settings.
 
 ### Test status

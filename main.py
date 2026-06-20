@@ -130,7 +130,7 @@ def _strategy_label(strategy: str) -> str:
 # Globals
 # ============================================================================
 _args = argparse.ArgumentParser()
-_args.add_argument("--config", default=os.getenv("CONFIG_FILE", "config/config_v4.yaml"))
+_args.add_argument("--config", default=os.getenv("CONFIG_FILE", "config/config_v4_hl.yaml"))
 CLI = _args.parse_args()
 
 CONFIG: AppConfig = load_config(CLI.config)
@@ -1527,6 +1527,51 @@ async def periodic_reporter_heartbeat() -> None:
 
 
 # ============================================================================
+# Agent expiration monitor (HL-specific) — cheia agent EXPIRA la 180 zile,
+# dupa care bot-ul nu mai poate semna ordere. SIGKILL silent fara warning ⇒
+# alerta Telegram cu 14 zile inainte + repeat la 7/3/1 zile pt visibility.
+# ============================================================================
+
+async def agent_expiration_monitor() -> None:
+    """Verifica fetch_agent_expiration_ms() la fiecare 12h. Alerta Telegram
+    progresiva (14d, 7d, 3d, 1d zile ramase). Fail-safe: exceptii loggate."""
+    check_interval_s = int(os.getenv("AGENT_EXP_CHECK_HOURS", "12")) * 3600
+    alert_thresholds_days = [14, 7, 3, 1]
+    # Track alerte deja trimise (per threshold) ca sa nu spam
+    sent_alerts: set[int] = set()
+    while True:
+        await asyncio.sleep(check_interval_s)
+        try:
+            exp_ms = await ex.fetch_agent_expiration_ms()
+            if not exp_ms:
+                continue  # API nu a returnat expiration, skip
+            now_ms = int(time.time() * 1000)
+            days_left = (exp_ms - now_ms) / (1000 * 86400)
+            print(f"  [AGENT-EXP] {days_left:.1f} zile pana la expirare")
+            # Trimite la primul threshold pe care nu l-am alertat inca
+            for thresh in alert_thresholds_days:
+                if days_left < thresh and thresh not in sent_alerts:
+                    sent_alerts.add(thresh)
+                    try:
+                        await tg.send_critical(
+                            f"Agent HL expira in {days_left:.1f} zile",
+                            f"<b>Zile ramase:</b> {days_left:.1f}\n"
+                            f"<b>Threshold trigger:</b> {thresh}d\n"
+                            f"Dupa expirare, V4_HL NU mai poate semna ordere "
+                            f"(silent failure).\n\n"
+                            f"<b>Actiune:</b>\n"
+                            f"  1. HL UI → Settings → API → Generate noua cheie agent\n"
+                            f"  2. Update HL_AGENT_PRIVATE_KEY in compose env\n"
+                            f"  3. Redeploy stack Portainer",
+                        )
+                    except Exception as tg_e:
+                        print(f"  [AGENT-EXP] Telegram alert failed: {tg_e}")
+                    break  # un singur alert per check
+        except Exception as e:
+            print(f"  [AGENT-EXP] check failed: {type(e).__name__}: {e}")
+
+
+# ============================================================================
 # Bootstrap
 # ============================================================================
 
@@ -1829,23 +1874,48 @@ async def lifespan(app: FastAPI):
     # Spawn background tasks (memory_monitor inclusiv — pre-OOM Telegram alert
     # cand RSS > MEM_MON_RSS_ALERT_MB; SIGKILL/OOM NU invoca excepthook,
     # singura fereastra de notification e PRE-kill via monitor).
-    # HL WS multi-pair: ONE socket per coin pt candle + ONE socket pt events
-    # (orderUpdates + userEvents pe wallet HL_MAIN_ADDRESS).
+    # HL WS multi-pair: ONE socket per coin pt candle + ONE socket pt events.
+    # Wrapper-uri pt paritate cu V4 Bybit:
+    #   1. on_confirmed_bar gap-fill: la reconnect WS, bare ratate aduse via REST
+    #   2. on_unconfirmed_bar: tracking _last_prices pt uPnL fresh in periodic
+    #      heartbeat (max 1-2s stale vs 4h).
+    _TF_S = _TF_MS // 1000
+
+    async def _on_confirmed_bar_hl(sym: str, bar: dict) -> None:
+        # Gap-fill: daca avem un last_synced anterior si bara curenta vine cu
+        # gap (> _TF_S + 60s margin), aducem barele lipsa via REST inainte de
+        # a procesa cea curenta. _fill_ws_gap reuseaza pipeline-ul on_confirmed_bar.
+        ts_s = bar["ts_ms"] // 1000
+        last = _last_synced_ts.get(sym, 0)
+        if last and ts_s > last + _TF_S + 60:
+            try:
+                await _fill_ws_gap(sym, ts_s)
+            except Exception as e:
+                print(f"  [{sym}] gap-fill failed: {e!r}")
+        # Forward la pipeline normal
+        await on_confirmed_bar(sym, bar)
+
+    async def _on_unconfirmed_bar_hl(sym: str, bar: dict) -> None:
+        # Tracking _last_prices pe ORICE tick → uPnL dashboard fresh in
+        # periodic_reporter_heartbeat (paritate cu V4 Bybit public_ws_loop).
+        _last_prices[sym] = float(bar["close"])
+
     enabled_symbols = [p.symbol for p in CONFIG.pairs if p.enabled]
     tasks = [
         asyncio.create_task(hl_ws_runner.public_ws_loop_hl(
             symbols=enabled_symbols,
             interval_str=_TF_INTERVAL,
-            on_confirmed_bar=on_confirmed_bar,
-            on_unconfirmed_bar=None,  # V4 doesn't process intra-bar (strategy on confirm only)
+            on_confirmed_bar=_on_confirmed_bar_hl,
+            on_unconfirmed_bar=_on_unconfirmed_bar_hl,
         )),
         asyncio.create_task(hl_ws_runner.private_ws_loop_hl(
             on_order_update=on_order_event,
-            on_user_event=on_position_event,  # HL userEvents (fills) → close detect
+            on_user_event=on_position_event,
         )),
         asyncio.create_task(heartbeat_loop()),
         asyncio.create_task(memory_monitor(BOT_NAME, tg_alert=tg.send_critical)),
         asyncio.create_task(periodic_reporter_heartbeat()),
+        asyncio.create_task(agent_expiration_monitor()),
     ]
     try:
         yield
