@@ -36,7 +36,7 @@ services:
       - CHART_TZ=${CHART_TZ:-Europe/Bucharest}
       - BOT_NAME=V4_HL
       - BOT_VERSION=${BOT_VERSION:-}
-      - STRATEGY_NAME=BB-MR + Hull+Ichimoku (HL)
+      - STRATEGY_NAME=BB-MR + Hull+Ichimoku (hl)
       - CHART_PORT=8204
       - CHART_HOST_PORT=8204
       - DATA_DIR=/app/data
