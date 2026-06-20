@@ -232,6 +232,23 @@ async def broadcast(payload: dict) -> None:
         _clients.discard(ws)
 
 
+def _push_candle_ring(symbol: str, bar: dict) -> None:
+    """Update/append bara in _candles ring (sursa pt chart via /api/init).
+    Mirror V4 Bybit WS handler (main.py:1346): acelasi ts → update last
+    (intra-bar tick), ts nou → append (cap 5000). Pe HL asta lipsea din
+    handler-ele candle → ring gol → chart fara bare/scala."""
+    ts_s = bar["ts_ms"] // 1000
+    row = [ts_s, float(bar["open"]), float(bar["high"]),
+           float(bar["low"]), float(bar["close"])]
+    ring = _candles.setdefault(symbol, [])
+    if ring and ring[-1][0] == ts_s:
+        ring[-1] = row
+    else:
+        ring.append(row)
+        if len(ring) > 5000:
+            ring.pop(0)
+
+
 def _direction_to_side(direction: str) -> str:
     """LONG -> Buy, SHORT -> Sell (Bybit native capitalized)."""
     return "Buy" if direction == "LONG" else "Sell"
@@ -1600,6 +1617,10 @@ async def bootstrap() -> None:
             df = df[["open", "high", "low", "close", "volume"]].astype(float)
             sig.warm_up(df)
             _last_synced_ts[sym] = int(bars[-1][0]) // 1000  # bars ASC → cel mai nou
+            # Seed chart ring din warmup → chart-ul arata istoricul imediat la
+            # load (pe 4h altfel ar fi gol pana la primul WS confirmed bar, ore).
+            _candles[sym] = [[int(b[0]) // 1000, float(b[1]), float(b[2]),
+                              float(b[3]), float(b[4])] for b in bars]
             print(f"  [{sym}] warmup {len(bars)} bars  last={df.index[-1]}")
         else:
             print(f"  [{sym}] FATAL: warmup esuat dupa 4 retry-uri — halt simbol")
@@ -1832,6 +1853,9 @@ async def lifespan(app: FastAPI):
                 await _fill_ws_gap(sym, ts_s)
             except Exception as e:
                 print(f"  [{sym}] gap-fill failed: {e!r}")
+        # Append bara confirmed in ring (chart). on_confirmed_bar broadcastuieste
+        # candle separat; aici doar persistam in _candles pt /api/init la reload.
+        _push_candle_ring(sym, bar)
         # Forward la pipeline normal
         await on_confirmed_bar(sym, bar)
 
@@ -1839,6 +1863,16 @@ async def lifespan(app: FastAPI):
         # Tracking _last_prices pe ORICE tick → uPnL dashboard fresh in
         # periodic_reporter_heartbeat (paritate cu V4 Bybit public_ws_loop).
         _last_prices[sym] = float(bar["close"])
+        # Update bara curenta in ring + broadcast intra-bar → chart live
+        # (paritate V4 Bybit main.py:1372). NU evaluam strategia pe tick.
+        _push_candle_ring(sym, bar)
+        ts_s = bar["ts_ms"] // 1000
+        await broadcast({
+            "type": "candle", "symbol": sym,
+            "candle": {"time": ts_s,
+                       "open": float(bar["open"]), "high": float(bar["high"]),
+                       "low": float(bar["low"]), "close": float(bar["close"])},
+        })
 
     enabled_symbols = [p.symbol for p in CONFIG.pairs if p.enabled]
 
