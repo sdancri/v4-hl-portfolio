@@ -333,6 +333,18 @@ async def get_position_qty(symbol: str,
     return float(pos["qty"])    # absolute, always >=0
 
 
+async def get_position(symbol: str,
+                       user: Optional[str] = None) -> Optional[dict]:
+    """V4 Bybit-compat: dict pozitie cu cheia "size" (qty ABSOLUTE) sau None
+    daca flat. main.py (_reconcile_close/_assert_closed) face
+    float(pos.get("size", 0)). BP-HL n-are functia asta — delta V4 (altfel
+    AttributeError pe ramurile de reconciliere)."""
+    pos = await fetch_open_position(symbol, user)
+    if not pos:
+        return None
+    return {**pos, "size": float(pos["qty"])}
+
+
 async def get_position_qty_strict(symbol: str,
                                    user: Optional[str] = None) -> Optional[float]:
     """
@@ -384,11 +396,16 @@ async def cancel_all_stops(symbol: str) -> int:
 
 async def chase_close(symbol: str, direction: str,
                       max_attempts: int = 20,
-                      interval_sec: float = 3.0) -> None:
+                      interval_sec: float = 3.0) -> bool:
     """
     HL chase_close — simplified vs Bybit (HL n-are post-only maker chase semnificativ
     diferit de aggressive limit IOC). Cancel toate trigger orders + loop market
     reduce-only pana cand qty=0.
+
+    Returneaza True daca pozitia e confirmata inchisa (qty<=eps), False daca
+    toate incercarile s-au epuizat cu pozitia inca deschisa. V4 main.py
+    (_close_position_locked) face `if not ok:` → contract bool OBLIGATORIU
+    (BP-HL intoarce None — delta V4).
     """
     await cancel_all_stops(symbol)
     close_side = "Sell" if direction == "LONG" else "Buy"
@@ -401,13 +418,17 @@ async def chase_close(symbol: str, direction: str,
             continue
         if qty <= 1e-9:
             print(f"  [HL] Chase close: pozitie inchisa ({attempt} incercari)")
-            return
+            return True
 
         # Market reduce-only (aggressive limit IOC)
         result = await _place_market_internal(symbol, close_side, qty, reduce_only=True)
         print(f"  [HL] Chase {attempt+1}/{max_attempts}: {close_side} qty={qty} "
               f"→ {result.get('result')} filled={result.get('filled_qty', 0)}")
         await asyncio.sleep(interval_sec)
+
+    # Toate incercarile epuizate — verifica o ultima data
+    qty_final = await get_position_qty_strict(symbol)
+    return qty_final is not None and qty_final <= 1e-9
 
 
 async def fetch_open_position(symbol: str,

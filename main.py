@@ -830,6 +830,16 @@ async def _close_position_locked(symbol: str, exit_reason: str,
                       error=f"{e!r} | {e2!r}")
             return
 
+    # HL: SL/TP sunt trigger orders STANDALONE (nu position-attached ca Bybit) →
+    # NU se auto-sterg cand pozitia se inchide. Pe path-ul normal (place_market
+    # reduce-only) ar ramane orfane si ar declansa pe o pozitie viitoare. Cancel
+    # explicit, best-effort (chase_close le sterge deja pe fallback; re-cancel e
+    # idempotent). Pe Bybit asta nu era necesar — adaptare HL, nu port Bybit.
+    try:
+        await ex.cancel_all_stops(symbol)
+    except Exception as e:
+        print(f"  [CLOSE {symbol}] cancel_all_stops best-effort failed: {e!r}")
+
     # Reconcile cu Bybit (4 ramuri). Pe anomalie raise → halt simbol in caller.
     try:
         final_exit_reason = await _reconcile_close(
@@ -1856,17 +1866,34 @@ async def lifespan(app: FastAPI):
         # Append bara confirmed in ring (chart). on_confirmed_bar broadcastuieste
         # candle separat; aici doar persistam in _candles pt /api/init la reload.
         _push_candle_ring(sym, bar)
+        # Dedup + AVANSEAZA ancora (paritate V4 Bybit main.py:1357-1361). _fill_ws_gap
+        # poate fi deja avansat _last_synced_ts → re-citim. FARA asta, ancora ramane
+        # inghetata la valoarea de warmup → gap-fill REST + re-evaluare strategie pe
+        # FIECARE bara (decizii duplicate, posibil entry/close spurios).
+        if ts_s <= _last_synced_ts.get(sym, 0):
+            return  # bara deja procesata (re-emisie HL sau adusa de gap-fill)
+        _last_synced_ts[sym] = ts_s
+        _state.mark_first_candle(sym, ts_s)
         # Forward la pipeline normal
         await on_confirmed_bar(sym, bar)
 
     async def _on_unconfirmed_bar_hl(sym: str, bar: dict) -> None:
+        # Gap-fill la PRIMUL tick al sesiunii WS per simbol (paritate V4 Bybit
+        # main.py:1343 _sync_done) → barele inchise in timpul unui disconnect
+        # sunt recuperate imediat, nu abia la urmatorul close confirmed (~4h).
+        ts_s = bar["ts_ms"] // 1000
+        if not _sync_done.get(sym):
+            _sync_done[sym] = True
+            try:
+                await _fill_ws_gap(sym, ts_s)
+            except Exception as e:
+                print(f"  [{sym}] first-tick gap-fill failed: {e!r}")
         # Tracking _last_prices pe ORICE tick → uPnL dashboard fresh in
         # periodic_reporter_heartbeat (paritate cu V4 Bybit public_ws_loop).
         _last_prices[sym] = float(bar["close"])
         # Update bara curenta in ring + broadcast intra-bar → chart live
         # (paritate V4 Bybit main.py:1372). NU evaluam strategia pe tick.
         _push_candle_ring(sym, bar)
-        ts_s = bar["ts_ms"] // 1000
         await broadcast({
             "type": "candle", "symbol": sym,
             "candle": {"time": ts_s,
