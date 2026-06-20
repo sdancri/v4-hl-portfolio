@@ -29,7 +29,10 @@ Env vars (esential):
     HL_MAIN_ADDRESS    — wallet address Hyperliquid (account principal)
     HL_AGENT_PRIVATE_KEY — cheia agent generata via scripts/gen_agent.py
                           (EXPIRA la 180 zile → monitor!)
-    HL_TESTNET         — "1" pt testnet, default "0" (mainnet)
+    HL_BASE_URL        — empty = mainnet defaults; testnet:
+                          https://api.hyperliquid-testnet.xyz
+    HL_WS_URL          — empty = mainnet defaults; testnet:
+                          wss://api.hyperliquid-testnet.xyz/ws
     BOT_NAME           — "v4"
     TELEGRAM_TOKEN     — opt
     TELEGRAM_CHAT_ID   — opt
@@ -1201,14 +1204,9 @@ async def on_confirmed_bar(symbol: str, bar: dict) -> None:
 # Public WS — klines consumer
 # ============================================================================
 
-async def public_ws_loop() -> None:
-    """Connect Bybit V5 public, subscribe kline.<interval>.<symbol> for each enabled pair."""
-    await _public_ws_run()
-
-
 async def _fill_ws_gap(symbol: str, first_ws_ts_s: int) -> None:
     """Backfill bare confirmed ratate intre ultima bara sincronizata si prima
-    bara primita pe (re)conectarea WS curenta. Bybit streameaza kline DOAR de la
+    bara primita pe (re)conectarea WS curenta. HL streameaza candle DOAR de la
     subscribe inainte — barele inchise in timpul unui disconnect NU sunt
     retrimise → fara backfill, semnalul de pe bara ratata nu e evaluat
     (entry/exit ratat → desync fata de Pine). Le aducem prin REST si le rulam
@@ -1252,141 +1250,6 @@ async def _fill_ws_gap(symbol: str, first_ws_ts_s: int) -> None:
         n += 1
     print(f"  [SYNC {symbol}] gap filled: {n} bare "
           f"(last_synced → {_last_synced_ts.get(symbol)})")
-
-
-async def _public_ws_run() -> None:
-    enabled = [p.symbol for p in CONFIG.pairs if p.enabled]
-    topics = [f"kline.{_TF_INTERVAL}.{s}" for s in enabled]
-    url = ("wss://stream-testnet.bybit.com/v5/public/linear"
-           if os.getenv("BYBIT_TESTNET", "0") == "1"
-           else "wss://stream.bybit.com/v5/public/linear")
-
-    # Triple defense vs WS zombie (conexiune ramane "open" dar nu mai curg
-    # mesaje): (1) keepalive nativ websockets (ping_interval/ping_timeout →
-    # ConnectionClosed pe pong miss), (2) Bybit app-level ping (unele
-    # endpoint-uri il asteapta), (3) watchdog pe last_msg_ts (force close daca
-    # nu vine niciun mesaj > WS_ZOMBIE_TIMEOUT). Toate → except → reconnect.
-    ws_zombie_timeout = int(os.getenv("WS_ZOMBIE_TIMEOUT", "60"))
-    while True:
-        try:
-            async with websockets.connect(url, ping_interval=20,
-                                          ping_timeout=10,
-                                          open_timeout=15) as ws:
-                await ws.send(json.dumps({"op": "subscribe", "args": topics}))
-                print(f"  [WS-PUB] subscribed: {topics}")
-                # Reset gap-check pe fiecare (re)conectare — daca WS a fost jos
-                # peste close-uri de bara, _fill_ws_gap le aduce prin REST la
-                # primul tick per simbol.
-                for s in enabled:
-                    _sync_done[s] = False
-
-                last_msg_ts = time.time()
-
-                async def _hb():
-                    while True:
-                        await asyncio.sleep(20)
-                        try:
-                            await ws.send(json.dumps({"op": "ping"}))
-                        except Exception:
-                            break
-
-                async def _watchdog():
-                    while True:
-                        await asyncio.sleep(10)
-                        idle = time.time() - last_msg_ts
-                        if idle > ws_zombie_timeout:
-                            print(f"  [WS-PUB] ZOMBIE detected: no msg "
-                                  f"{idle:.0f}s > {ws_zombie_timeout}s — "
-                                  f"forcing close → reconnect")
-                            try:
-                                await ws.close()
-                            except Exception:
-                                pass
-                            return
-
-                hb = asyncio.create_task(_hb())
-                wd = asyncio.create_task(_watchdog())
-                try:
-                    async for raw in ws:
-                        last_msg_ts = time.time()
-                        msg = json.loads(raw)
-                        if msg.get("op") in ("pong", "subscribe"):
-                            continue
-                        topic = msg.get("topic", "")
-                        if not topic.startswith("kline."):
-                            continue
-                        symbol = topic.split(".")[-1]
-                        for k in msg.get("data", []):
-                            confirmed = bool(k.get("confirm", False))
-                            ts_ms = int(k["start"])
-                            bar = {
-                                "ts_ms": ts_ms,
-                                "open": float(k["open"]),
-                                "high": float(k["high"]),
-                                "low": float(k["low"]),
-                                "close": float(k["close"]),
-                                "volume": float(k.get("volume", 0)),
-                                "confirmed": confirmed,
-                            }
-                            # Track last_price per simbol pe ORICE tick (confirmed
-                            # sau intra-bar) → _periodic_heartbeat foloseste pt
-                            # uPnL fresh la dashboard (max 1-2s stale vs 4h).
-                            _last_prices[symbol] = bar["close"]
-                            # Track all bars in candles ring (for chart).
-                            # Confirmed bars: dedup pe ts (un singur ts unic
-                            # per bara confirmed). Unconfirmed bars (intra-bar
-                            # tick-uri): TOT broadcast la chart pt update real-time,
-                            # dar fara dedup si fara on_confirmed_bar (NU evaluam
-                            # strategia pe tick — doar pe bara inchisa).
-                            ts_s = ts_ms // 1000
-                            # Gap-fill la primul tick al sesiunii WS curente
-                            # (per simbol): aduce barele inchise ratate in timpul
-                            # unui disconnect (Bybit nu le retrimite).
-                            if not _sync_done.get(symbol):
-                                _sync_done[symbol] = True
-                                await _fill_ws_gap(symbol, ts_s)
-                            ring = _candles.setdefault(symbol, [])
-                            if ring and ring[-1][0] == ts_s:
-                                ring[-1] = [ts_s, bar["open"], bar["high"],
-                                            bar["low"], bar["close"]]
-                            else:
-                                ring.append([ts_s, bar["open"], bar["high"],
-                                             bar["low"], bar["close"]])
-                                if len(ring) > 5000:
-                                    ring.pop(0)
-
-                            if confirmed:
-                                last_synced = _last_synced_ts.get(symbol, 0)
-                                if ts_s <= last_synced:
-                                    continue  # dedup confirmed only
-                                _last_synced_ts[symbol] = ts_s
-                                _state.mark_first_candle(symbol, ts_s)
-                                try:
-                                    await on_confirmed_bar(symbol, bar)
-                                except Exception:
-                                    print(f"  [{symbol}] on_confirmed_bar CRASHED:\n"
-                                          f"{traceback.format_exc()}")
-                            else:
-                                # Intra-bar tick → broadcast candle update la chart
-                                # (chart-ul vede pretul in formare in timp real).
-                                # NU evaluam strategie aici.
-                                try:
-                                    await broadcast({
-                                        "type": "candle", "symbol": symbol,
-                                        "candle": {"time": ts_s,
-                                                   "open": bar["open"],
-                                                   "high": bar["high"],
-                                                   "low": bar["low"],
-                                                   "close": bar["close"]},
-                                    })
-                                except Exception:
-                                    pass  # best-effort, nu blocam WS loop
-                finally:
-                    hb.cancel()
-                    wd.cancel()
-        except Exception as e:
-            print(f"  [WS-PUB] error: {e!r} — reconnect in 5s")
-            await asyncio.sleep(5)
 
 
 # ============================================================================
@@ -1527,46 +1390,100 @@ async def periodic_reporter_heartbeat() -> None:
 
 
 # ============================================================================
-# Agent expiration monitor (HL-specific) — cheia agent EXPIRA la 180 zile,
-# dupa care bot-ul nu mai poate semna ordere. SIGKILL silent fara warning ⇒
-# alerta Telegram cu 14 zile inainte + repeat la 7/3/1 zile pt visibility.
+# Agent expiration check + watchdog (pattern BP-HL):
+#   - BOOT check: o singura data la bootstrap. Daca agent NOT FOUND sau
+#     EXPIRED → tg.send_critical + RuntimeError (boot fail). Daca <14d ramase
+#     → tg.send warning + continua boot. Altfel doar print.
+#   - WATCHDOG task: zilnic. Daca EXPIRED → tg.send_critical. Daca <14d ramase
+#     → tg.send warning (mesaj ZILNIC pana se schimba cheia — visibility maxima).
+#
+# Env:
+#   AGENT_EXPIRY_WARN_DAYS = 14         (prag warning)
+#   AGENT_EXPIRY_CHECK_INTERVAL_SEC = 86400  (interval watchdog, 1 zi)
 # ============================================================================
 
-async def agent_expiration_monitor() -> None:
-    """Verifica fetch_agent_expiration_ms() la fiecare 12h. Alerta Telegram
-    progresiva (14d, 7d, 3d, 1d zile ramase). Fail-safe: exceptii loggate."""
-    check_interval_s = int(os.getenv("AGENT_EXP_CHECK_HOURS", "12")) * 3600
-    alert_thresholds_days = [14, 7, 3, 1]
-    # Track alerte deja trimise (per threshold) ca sa nu spam
-    sent_alerts: set[int] = set()
-    while True:
-        await asyncio.sleep(check_interval_s)
+AGENT_EXPIRY_WARN_DAYS = int(os.getenv("AGENT_EXPIRY_WARN_DAYS", "14"))
+AGENT_EXPIRY_CHECK_INTERVAL_SEC = int(os.getenv("AGENT_EXPIRY_CHECK_INTERVAL_SEC", "86400"))
+
+
+async def _agent_expiry_boot_check() -> None:
+    """One-time check la bootstrap (pattern BP-HL main.py:684-711):
+      1. HL_AGENT_PRIVATE_KEY missing → critical + RuntimeError
+      2. agent NOT FOUND in extraAgents → critical + RuntimeError
+      3. days < 0 (EXPIRED) → critical + RuntimeError
+      4. days < AGENT_EXPIRY_WARN_DAYS → tg.send warning + continue
+      5. else → print log + continue
+    """
+    if not os.getenv("HL_AGENT_PRIVATE_KEY", "").strip():
+        msg = ("<b>HL_AGENT_PRIVATE_KEY</b> not set in env.\n"
+               "Genereaza agent via scripts/gen_agent.py + seteaza in compose.")
         try:
-            exp_ms = await ex.fetch_agent_expiration_ms()
-            if not exp_ms:
-                continue  # API nu a returnat expiration, skip
-            now_ms = int(time.time() * 1000)
-            days_left = (exp_ms - now_ms) / (1000 * 86400)
-            print(f"  [AGENT-EXP] {days_left:.1f} zile pana la expirare")
-            # Trimite la primul threshold pe care nu l-am alertat inca
-            for thresh in alert_thresholds_days:
-                if days_left < thresh and thresh not in sent_alerts:
-                    sent_alerts.add(thresh)
-                    try:
-                        await tg.send_critical(
-                            f"Agent HL expira in {days_left:.1f} zile",
-                            f"<b>Zile ramase:</b> {days_left:.1f}\n"
-                            f"<b>Threshold trigger:</b> {thresh}d\n"
-                            f"Dupa expirare, V4_HL NU mai poate semna ordere "
-                            f"(silent failure).\n\n"
-                            f"<b>Actiune:</b>\n"
-                            f"  1. HL UI → Settings → API → Generate noua cheie agent\n"
-                            f"  2. Update HL_AGENT_PRIVATE_KEY in compose env\n"
-                            f"  3. Redeploy stack Portainer",
-                        )
-                    except Exception as tg_e:
-                        print(f"  [AGENT-EXP] Telegram alert failed: {tg_e}")
-                    break  # un singur alert per check
+            await tg.send_critical(f"{BOT_NAME} agent key MISSING", msg)
+        except Exception:
+            pass
+        raise RuntimeError("HL_AGENT_PRIVATE_KEY missing")
+    try:
+        valid_until = await ex.fetch_agent_expiration_ms()
+    except Exception as e:
+        print(f"  [BOOT] agent expiry check failed (continuing): "
+              f"{type(e).__name__}: {e}")
+        return
+    agent_addr = getattr(ex, "HL_AGENT_ADDRESS", "") or "<unknown>"
+    if valid_until is None:
+        msg = (f"Agent <code>{agent_addr}</code> NOT FOUND in main wallet's "
+               f"extraAgents on HL. Verifica autorizare la "
+               f"app.hyperliquid.xyz/API.")
+        try:
+            await tg.send_critical(f"{BOT_NAME} agent unauthorized", msg)
+        except Exception:
+            pass
+        raise RuntimeError("agent not authorized on HL")
+    days_left = (valid_until - int(time.time() * 1000)) / 86_400_000.0
+    if days_left < 0:
+        try:
+            await tg.send_critical(
+                f"{BOT_NAME} agent EXPIRED",
+                f"Cheia agent <code>{agent_addr}</code> expirata de "
+                f"<b><code>{abs(days_left):.1f}</code></b> zile.\n"
+                f"Bot-ul NU poate trada — regenereaza cheia + restart."
+            )
+        except Exception:
+            pass
+        raise RuntimeError(f"agent expired {abs(days_left):.1f}d ago")
+    elif days_left < AGENT_EXPIRY_WARN_DAYS:
+        try:
+            await tg.send(
+                f"⚠️ {BOT_NAME} agent expira curand",
+                f"Cheia agent expira in <b><code>{days_left:.1f}</code></b> zile.\n"
+                f"Regenereaza inainte sa pierzi accesul."
+            )
+        except Exception:
+            pass
+    print(f"  [BOOT] HL agent {agent_addr} valid {days_left:.1f}d")
+
+
+async def agent_expiration_monitor() -> None:
+    """Watchdog zilnic agent expiry. Pattern BP-HL: mesaj zilnic sub 14d (NO
+    DEDUP — visibility maxima pana se regenereaza cheia). Fail-safe: exceptii
+    logged, NU rup trading."""
+    while True:
+        try:
+            await asyncio.sleep(AGENT_EXPIRY_CHECK_INTERVAL_SEC)
+            valid_until = await ex.fetch_agent_expiration_ms()
+            if valid_until is None:
+                continue
+            days_left = (valid_until - int(time.time() * 1000)) / 86_400_000.0
+            if days_left < 0:
+                await tg.send_critical(
+                    f"{BOT_NAME} agent EXPIRED",
+                    f"Cheia agent expirata de <b><code>{abs(days_left):.1f}</code></b> zile.\n"
+                    f"Bot-ul NU mai poate trada. Regenereaza + restart."
+                )
+            elif days_left < AGENT_EXPIRY_WARN_DAYS:
+                await tg.send(
+                    f"⚠️ {BOT_NAME} agent expira in {days_left:.1f} zile",
+                    "Regenereaza cheia + restart bot."
+                )
         except Exception as e:
             print(f"  [AGENT-EXP] check failed: {type(e).__name__}: {e}")
 
@@ -1583,6 +1500,12 @@ async def bootstrap() -> None:
     print(f"  Pairs:    {pairs_summary}")
     print(f"  Chart:    http://0.0.0.0:{CHART_PORT}/  (TZ: {CHART_TZ})")
     print(f"{'='*70}\n")
+
+    # HL agent expiration boot check (pattern BP-HL):
+    # raise RuntimeError daca EXPIRED → boot fail visibility maxima.
+    # <14 zile → Telegram warning + continua. Vezi _agent_expiry_watchdog
+    # task pentru reminder ZILNIC pana se regenereaza cheia.
+    await _agent_expiry_boot_check()
 
     # Restore state if persisted
     await asyncio.to_thread(_state.load)
@@ -1901,6 +1824,46 @@ async def lifespan(app: FastAPI):
         _last_prices[sym] = float(bar["close"])
 
     enabled_symbols = [p.symbol for p in CONFIG.pairs if p.enabled]
+
+    async def _on_user_event_hl_adapter(event: dict) -> None:
+        """Adapter HL userEvents → V4 on_position_event Bybit-shape.
+        HL ws_hl trimite {"kind": "fills"|"funding"|..., "data": <payload>}.
+        V4 on_position_event asteapta {"symbol": ..., "size": ..., "avgPrice": ...}.
+        Pe fill, query Bybit-style: get_position_qty(symbol) pt size curent.
+        """
+        kind = event.get("kind", "")
+        if kind != "fills":
+            # alte tipuri (funding, liq) — doar log
+            print(f"  [HL USEREV] {kind}: {str(event.get('data'))[:200]}")
+            return
+        # Pe fill: ws_hl _handle_user_events filtreaza fills per coin (modificare
+        # V4_HL vs BP-HL upstream — fix triple-fire pe multi-pair). Asadar toate
+        # fills primite pe acest socket sunt pt coin-ul socket-ului. coins_seen
+        # dedup pe acelasi update (acelasi simbol in 2 fills consecutive in
+        # acelasi payload — rare, dar posibil pe scale-out partial).
+        fills = event.get("data") or []
+        if not isinstance(fills, list):
+            return
+        coins_seen: set[str] = set()
+        for fill in fills:
+            try:
+                coin = (fill.get("coin") or "").upper()
+                if not coin or coin in coins_seen:
+                    continue
+                coins_seen.add(coin)
+                if coin not in _signals:
+                    continue  # not our pair
+                qty_abs = await ex.get_position_qty(coin)
+                avg_px = float(fill.get("px", 0) or 0)
+                await on_position_event({
+                    "symbol": coin,
+                    "size": str(qty_abs),
+                    "avgPrice": avg_px,
+                    "raw": fill,
+                })
+            except Exception as e:
+                print(f"  [HL USEREV] fill adapter failed: {type(e).__name__}: {e}")
+
     tasks = [
         asyncio.create_task(hl_ws_runner.public_ws_loop_hl(
             symbols=enabled_symbols,
@@ -1909,8 +1872,9 @@ async def lifespan(app: FastAPI):
             on_unconfirmed_bar=_on_unconfirmed_bar_hl,
         )),
         asyncio.create_task(hl_ws_runner.private_ws_loop_hl(
+            symbols=enabled_symbols,
             on_order_update=on_order_event,
-            on_user_event=on_position_event,
+            on_user_event=_on_user_event_hl_adapter,
         )),
         asyncio.create_task(heartbeat_loop()),
         asyncio.create_task(memory_monitor(BOT_NAME, tg_alert=tg.send_critical)),

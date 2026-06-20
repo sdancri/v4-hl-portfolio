@@ -1229,15 +1229,18 @@ async def set_position_sl(symbol:     str,
     """
     BP-compat signature (incl. max_retries + send_tg_on_fail). Plaseaza
     trigger order reduce-only pt SL pe pozitia activa.
-    `tp_price` IGNORAT pe HL (TP NU se planteaza pe exchange — strategiile
-    detecteaza intra-bar si cheama exit, la fel ca SL software-only din BP).
+
+    V4_HL EXTENDS BP-HL: cand tp_price > 0, plaseaza ATOMIC si trigger TP
+    (tpsl="tp") in acelasi action ca SL → AMBELE trigger orders sub o singura
+    semnatura. SL fail blocheaza retry, TP fail = warning + continue (TP nu e
+    critic safety).
 
     `max_retries`: 4 default (Layer 1 retry). 1 = fail-fast (Layer 0/Layer 2 calls).
-    `send_tg_on_fail`: True trimite Telegram critical pe esec final.
+    `send_tg_on_fail`: True trimite Telegram critical pe esec final (SL).
     Backoff intre retries: [0, 1, 2, 4][:max_retries].
 
-    Returneaza True pe succes, False pe esec final (toate retries epuizate).
-    Inferre direction din pos curenta (LONG -> sell SL, SHORT -> buy SL).
+    Returneaza True pe succes (SL OK; TP best-effort), False pe esec SL final.
+    Inferre direction din pos curenta (LONG -> sell SL/TP, SHORT -> buy SL/TP).
     """
     coin = _coin(symbol)
     backoff = [0, 1, 2, 4][:max(1, max_retries)]
@@ -1595,9 +1598,11 @@ async def set_leverage(symbol: str, leverage: int) -> bool:
     Returneaza True pe success. Pe failure: log + False (V4 trateaza idempotent).
     """
     try:
+        # Bugfix: foloseste asset_id (key real din _meta), nu "idx" (key inexistenta
+        # care intoarcea 0 → set_leverage pe asset 0 = BTC pt orice simbol).
         action = {
             "type": "updateLeverage",
-            "asset": _meta(symbol).get("idx", 0),
+            "asset": _meta(symbol)["asset_id"],
             "isCross": False,  # isolated default (consistent cu V4 Bybit isolated)
             "leverage": int(leverage),
         }

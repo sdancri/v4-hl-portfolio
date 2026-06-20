@@ -19,7 +19,17 @@ services:
       - CONFIG_FILE=config/config_v4_hl.yaml
       - HL_MAIN_ADDRESS=${HL_MAIN_ADDRESS}
       - HL_AGENT_PRIVATE_KEY=${HL_AGENT_PRIVATE_KEY}
-      - HL_TESTNET=${HL_TESTNET:-0}
+      - HL_AGENT_ADDRESS=${HL_AGENT_ADDRESS:-}
+      # Mainnet/testnet selectat prin URL-uri (NU prin HL_TESTNET flag).
+      # Empty → exchange_api foloseste mainnet defaults.
+      # Testnet: HL_BASE_URL=https://api.hyperliquid-testnet.xyz si
+      #          HL_WS_URL=wss://api.hyperliquid-testnet.xyz/ws
+      - HL_BASE_URL=${HL_BASE_URL:-}
+      - HL_WS_URL=${HL_WS_URL:-}
+      # Agent expiration check + watchdog (cheia agent HL expira la 180 zile).
+      # Boot check + watchdog ZILNIC mesaj sub WARN_DAYS pana se regenereaza.
+      - AGENT_EXPIRY_WARN_DAYS=${AGENT_EXPIRY_WARN_DAYS:-14}
+      - AGENT_EXPIRY_CHECK_INTERVAL_SEC=${AGENT_EXPIRY_CHECK_INTERVAL_SEC:-86400}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - TZ=Europe/Bucharest
@@ -42,7 +52,10 @@ services:
       - BOT_REPORTER_HEARTBEAT_SEC=${BOT_REPORTER_HEARTBEAT_SEC:-30}
       - TAKER_FEE_RATE=${TAKER_FEE_RATE:-0.00045}
     ports:
-      - "8204:8204"
+      # Bind defensiv: daca TAILSCALE_IP setat in env → bind doar pe IP tailnet
+      # (acces privat via Tailscale). Altfel fallback la 0.0.0.0 (public).
+      # User: seteaza TAILSCALE_IP=$(tailscale ip -4) in env pt productie.
+      - "${TAILSCALE_IP:-0.0.0.0}:8204:8204"
     volumes:
       - /srv/bots/V4_HL/logs:/app/logs
       - /srv/bots/V4_HL/data:/app/data

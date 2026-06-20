@@ -329,9 +329,19 @@ class HLWebSocket:
     async def _handle_user_events(self, data) -> None:
         if self._on_user_event is None:
             return
-        # HL userEvents este un dict cu chei variabile (fills, funding, liquidation)
-        # Pasam raw + tipul dedus
+        # HL userEvents este un dict cu chei variabile (fills, funding, liquidation).
+        # V4_HL FIX (vs BP-HL identic upstream): filtreaza fills per coin (mirror
+        # la _handle_order_updates). Fara filtru, in multi-pair cele N sockets
+        # primesc TOATE fills-urile wallet-ului → adapter ruleaza N× pe fiecare
+        # fill (triple-fire pe 3 perechi). Cu filter, fiecare socket vede DOAR
+        # fills-urile propriului coin. Funding/liquidation alte tipuri sunt
+        # NORM-wallet level, pasate ca atare (low-volume, fara duplicare risc).
         if not isinstance(data, dict):
             return
         for kind, payload in data.items():
+            if kind == "fills" and isinstance(payload, list):
+                payload = [f for f in payload
+                           if (f.get("coin") or "").upper() == self.coin]
+                if not payload:
+                    continue
             await self._on_user_event({"kind": kind, "data": payload})

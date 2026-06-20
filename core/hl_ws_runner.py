@@ -87,12 +87,18 @@ async def public_ws_loop_hl(
 
 
 async def private_ws_loop_hl(
+    symbols: list[str],
     on_order_update: Optional[Callable[[dict], Awaitable[None]]] = None,
     on_user_event: Optional[Callable[[dict], Awaitable[None]]] = None,
 ) -> None:
-    """Subscribe orderUpdates + userEvents pe HL_MAIN_ADDRESS. Single socket
-    multiplexat. HL nu are dedicated 'position' channel — detectia close
-    se face din userEvents (fills) + verificare get_position_qty=0.
+    """Subscribe orderUpdates + userEvents pe HL_MAIN_ADDRESS, ONE socket PER
+    coin (simetric cu pattern-ul candle). HL_AGENT_PRIVATE_KEY trimite events
+    pentru INTREGUL wallet, dar normalize_order_update din ws_hl.py filtreaza
+    PER COIN — pt multi-pair trebuie un socket per coin ca sa primim TIA + NEAR
+    orders/fills, nu doar BTC.
+
+    HL n-are dedicated 'position' channel — detectia close se face din
+    userEvents (fills) cu adapter intern (vezi main.py _on_user_event_hl_adapter).
     """
     user = os.getenv("HL_MAIN_ADDRESS", "")
     if not user:
@@ -100,13 +106,24 @@ async def private_ws_loop_hl(
               "(detectie close va folosi defense-in-depth check_external_close)")
         return
 
-    ws_client = HLWebSocket(
-        on_candle=None,
-        on_order_update=on_order_update,
-        on_user_event=on_user_event,
-        coin="BTC",  # placeholder — normalizer-ul candle nu se foloseste aici
-    )
-    ws_client.subscribe_order_updates(user)
-    ws_client.subscribe_user_events(user)
-    print(f"  [HL-WS] subscribe orderUpdates + userEvents pe {user}")
-    await ws_client.run()
+    print(f"  [HL-WS] starting {len(symbols)} events sockets (per coin) pe {user}")
+
+    async def _make_events_task(coin: str) -> None:
+        ws_client = HLWebSocket(
+            on_candle=None,
+            on_order_update=on_order_update,
+            on_user_event=on_user_event,
+            coin=coin,  # normalize_order_update filtreaza per coin
+        )
+        ws_client.subscribe_order_updates(user)
+        ws_client.subscribe_user_events(user)
+        print(f"  [HL-WS] events socket {coin}: orderUpdates + userEvents")
+        await ws_client.run()
+
+    tasks = [asyncio.create_task(_make_events_task(s)) for s in symbols]
+    try:
+        await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        for t in tasks:
+            t.cancel()
+        raise
