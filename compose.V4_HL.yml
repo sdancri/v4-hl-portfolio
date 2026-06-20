@@ -52,10 +52,11 @@ services:
       - BOT_REPORTER_HEARTBEAT_SEC=${BOT_REPORTER_HEARTBEAT_SEC:-30}
       - TAKER_FEE_RATE=${TAKER_FEE_RATE:-0.00045}
     ports:
-      # Bind defensiv: daca TAILSCALE_IP setat in env → bind doar pe IP tailnet
-      # (acces privat via Tailscale). Altfel fallback la 0.0.0.0 (public).
-      # User: seteaza TAILSCALE_IP=$(tailscale ip -4) in env pt productie.
-      - "${TAILSCALE_IP:-0.0.0.0}:8204:8204"
+      # Bind defensiv: chart-ul se leaga DOAR pe IP-ul tailnet (acces privat via
+      # Tailscale, NU public). Fallback = IP tailnet VPS (private-by-default, ca
+      # BP-HL). Pt expunere publica: seteaza explicit TAILSCALE_IP=0.0.0.0.
+      # `tailscale ip -4` da IP-ul tailnet al masinii.
+      - "${TAILSCALE_IP:-100.92.198.95}:8204:8204"
     volumes:
       - /srv/bots/V4_HL/logs:/app/logs
       - /srv/bots/V4_HL/data:/app/data

@@ -381,10 +381,11 @@ async def open_position(symbol: str, direction: str, close_price: float,
         symbol, side, qty,
         timeout_sec=5, fallback="market", reduce_only=False,
     )
-    if entry_result["result"] == "failed":
-        print(f"  [OPEN {symbol}] maker_entry_or_market FAILED")
+    # HL adapter intoarce "rejected" (NU "failed" ca Bybit) pe esec total.
+    if entry_result["result"] == "rejected":
+        print(f"  [OPEN {symbol}] maker_entry_or_market REJECTED")
         await tg.send_critical(f"OPEN FAILED — {symbol}",
-                               "maker_entry_or_market returned failed",
+                               "maker_entry_or_market returned rejected / 0 fill",
                                symbol=symbol)
         return
 
@@ -393,7 +394,7 @@ async def open_position(symbol: str, direction: str, close_price: float,
     await asyncio.sleep(0.5)
     real_fill_price = float(entry_result.get("avg_price") or 0) or close_price
     fill_kind = entry_result["result"]
-    if fill_kind in ("mixed", "taker"):
+    if fill_kind in ("mixed", "market"):
         # Avg-ul ponderat real vine cand fetch_pnl_for_trade trage closed-pnl;
         # pana atunci folosim signal price. Pt SL/TP calc, e suficient.
         real_fill_price = close_price
@@ -1228,7 +1229,7 @@ async def _fill_ws_gap(symbol: str, first_ws_ts_s: int) -> None:
         print(f"  [SYNC {symbol}] gap fetch failed: {e!r}")
         return
     n = 0
-    for row in raw:  # get_kline returneaza ASC
+    for row in reversed(raw):  # get_kline returneaza DESC → procesam ASC (cronologic)
         ts_s = int(row[0]) // 1000
         if ts_s <= last_synced or ts_s >= first_ws_ts_s:
             continue  # capete excluse (last_synced procesat; first_ws vine via WS)
@@ -1507,6 +1508,12 @@ async def bootstrap() -> None:
     # task pentru reminder ZILNIC pana se regenereaza cheia.
     await _agent_expiry_boot_check()
 
+    # Preload HL universe metadata (asset_id, sz/px precision, max leverage)
+    # INAINTE de set_leverage/sizing/order. Fara el, _meta() ridica "Instrument
+    # not in cache". Sanity-check: ridica daca vreun simbol enabled lipseste din
+    # universe HL.
+    await ex.preload_instruments([p.symbol for p in CONFIG.pairs if p.enabled])
+
     # Restore state if persisted
     await asyncio.to_thread(_state.load)
 
@@ -1570,6 +1577,13 @@ async def bootstrap() -> None:
                 bars = await ex.get_kline(sym, _TF_INTERVAL, limit=400)
                 bars = nl.filter_closed_bars(bars, _TF_INTERVAL)
                 if bars:
+                    # get_kline întoarce DESC (cel mai nou primul). Indicatorii
+                    # (BB/RSI/Ichimoku) + ancora de sync cer ASC (cronologic).
+                    # Fără reverse, seria e flipată → indicatori garbage și
+                    # _last_synced_ts ancorat pe bara cea mai VECHE (~66 zile in
+                    # urma) → gap-fill masiv pe primul tick WS. BP-HL face la fel
+                    # in load_history (reversed(raw)).
+                    bars = list(reversed(bars))
                     if attempt > 0:
                         print(f"  [{sym}] warmup OK dupa retry #{attempt}")
                     break
@@ -1579,10 +1593,13 @@ async def bootstrap() -> None:
         if bars:
             df = pd.DataFrame(bars, columns=["ts_ms", "open", "high", "low",
                                               "close", "volume", "turnover"])
+            # get_kline da str-uri → forteaza numeric inainte de indicatori
+            # (altfel np.isnan/SMA crapa pe dtype=object).
+            df["ts_ms"] = df["ts_ms"].astype("int64")
             df.index = pd.to_datetime(df["ts_ms"], unit="ms", utc=True)
-            df = df[["open", "high", "low", "close", "volume"]]
+            df = df[["open", "high", "low", "close", "volume"]].astype(float)
             sig.warm_up(df)
-            _last_synced_ts[sym] = int(bars[-1][0]) // 1000
+            _last_synced_ts[sym] = int(bars[-1][0]) // 1000  # bars ASC → cel mai nou
             print(f"  [{sym}] warmup {len(bars)} bars  last={df.index[-1]}")
         else:
             print(f"  [{sym}] FATAL: warmup esuat dupa 4 retry-uri — halt simbol")

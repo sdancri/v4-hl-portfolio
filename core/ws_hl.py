@@ -36,7 +36,7 @@ from typing import Awaitable, Callable, Optional
 import websockets
 
 
-HL_WS_URL = os.getenv("HL_WS_URL", "wss://api.hyperliquid.xyz/ws")
+HL_WS_URL = os.getenv("HL_WS_URL") or "wss://api.hyperliquid.xyz/ws"
 
 # Tipuri normalizate pt callbacks (pastram compat cu BP strategy shape)
 OnCandle      = Callable[[dict], Awaitable[None]]   # {ts, open, high, low, close, volume, confirmed}

@@ -50,7 +50,7 @@ from eth_account import Account
 # Config + HTTP client
 # ---------------------------------------------------------------------------
 
-HL_BASE_URL = os.getenv("HL_BASE_URL", "https://api.hyperliquid.xyz").rstrip("/")
+HL_BASE_URL = (os.getenv("HL_BASE_URL") or "https://api.hyperliquid.xyz").rstrip("/")
 HL_MAIN_ADDRESS = (os.getenv("HL_MAIN_ADDRESS") or "").strip().lower()
 HL_AGENT_PRIVATE_KEY = (os.getenv("HL_AGENT_PRIVATE_KEY") or "").strip()
 HL_AGENT_ADDRESS_EXPECTED = (os.getenv("HL_AGENT_ADDRESS") or "").strip().lower()
@@ -200,7 +200,9 @@ async def get_balance_spot_usdc(user: Optional[str] = None) -> float:
 
 
 async def get_kline(symbol: str, interval: str = "30",
-                    limit: int = 300) -> list[list]:
+                    limit: int = 300,
+                    start: Optional[int] = None,
+                    end: Optional[int] = None) -> list[list]:
     """
     Returneaza candles inchise pt `symbol` la `interval`.
 
@@ -209,15 +211,20 @@ async def get_kline(symbol: str, interval: str = "30",
       - HL native: "1m","5m","15m","30m","1h","4h","1d"
     Translatam intern la HL native (e ce cere candleSnapshot).
 
+    `start`/`end` (ms epoch, optionale) — fereastra explicita pt gap-fill
+    (REST backfill dupa disconnect WS). Daca lipsesc, derivam fereastra din
+    `limit` (ultimele ~limit bare pana acum). _fill_ws_gap le foloseste.
+
     HL format candleSnapshot returneaza list de dict cu t (start ms),
     o, h, l, c, v, n. Convertim la format compat BP: list de list
-    [ts_ms_str, open, high, low, close, volume].
+    [ts_ms_str, open, high, low, close, volume, turnover] DESC order.
     """
     coin = _coin(symbol)
     hl_interval = _to_hl_interval(interval)
     now_ms = int(time.time() * 1000)
     interval_ms = _interval_to_ms(hl_interval)
-    start_ms = now_ms - (limit + 5) * interval_ms
+    end_ms = int(end) if end is not None else now_ms
+    start_ms = int(start) if start is not None else end_ms - (limit + 5) * interval_ms
 
     raw = await _info({
         "type": "candleSnapshot",
@@ -225,13 +232,20 @@ async def get_kline(symbol: str, interval: str = "30",
             "coin":      coin,
             "interval":  hl_interval,
             "startTime": start_ms,
-            "endTime":   now_ms,
+            "endTime":   end_ms,
         },
     })
     # raw e list cu camp T (open time ms), c, h, l, o, v. ASC order.
     # Output compatibil cu BP Bybit get_kline: list[list[str]] DESC order.
     out: list[list] = []
     for c in raw:
+        # turnover (col 6) = quote volume. HL candleSnapshot nu-l da; aproximam
+        # base_vol * close ca echivalent Bybit, ca outputul sa aiba 7 coloane
+        # (consumatorii mirror din V4 Bybit cer [ts,o,h,l,c,v,turnover]).
+        try:
+            turnover = float(c["v"]) * float(c["c"])
+        except (KeyError, ValueError, TypeError):
+            turnover = 0.0
         out.append([
             str(c["t"]),         # open time ms (matched Bybit row[0])
             str(c["o"]),
@@ -239,6 +253,7 @@ async def get_kline(symbol: str, interval: str = "30",
             str(c["l"]),
             str(c["c"]),
             str(c["v"]),
+            str(turnover),       # col 6 — Bybit-compat (vezi nota de mai sus)
         ])
     # BP Bybit returneaza DESC, vom face la fel
     out.reverse()
@@ -1569,26 +1584,26 @@ async def fetch_pnl_for_trade(symbol: str,
 # ============================================================================
 
 async def get_market_info(symbol: str) -> dict:
-    """V4 Bybit-style market info. Pe HL: derivam din _meta + preload_instruments.
+    """V4 Bybit-style market info. Pe HL: derivam din _INSTRUMENTS (preload).
     Returneaza dict identic cu V4: qty_step, qty_prec, price_prec, min_qty, tick_size.
+
+    BUGFIX: _meta() expune chei snake_case (sz_decimals), NU camelCase HL
+    (szDecimals/pxDecimals). Vechiul cod citea cheile gresite → toate cadeau pe
+    default → qty_step=0.01, min_qty=1 pt ORICE coin → orice entry skip-uit
+    (BTC la ~$100k cu min_qty=1 = $100k notional). Folosim helperii corecti
+    _qty_step/_qty_prec + regula HL de pret (max 6-sz_dec zecimale, vezi _fmt_price).
     """
-    # Ensure preloaded
-    try:
+    if _coin(symbol) not in _INSTRUMENTS:
         await preload_instruments([_coin(symbol)])
-    except Exception:
-        pass
-    meta = _meta(symbol)
-    qty_step = float(meta.get("szDecimals", 0))
-    qty_prec = int(meta.get("szDecimals", 0))
-    price_prec = int(meta.get("pxDecimals", 2))
-    # HL nu expune min_qty per simbol; derivam din szDecimals
-    min_qty = 1 / (10 ** qty_prec) if qty_prec > 0 else 1
-    tick_size = 1 / (10 ** price_prec) if price_prec > 0 else 0.01
+    sz_dec = _qty_prec(symbol)               # = sz_decimals al coin-ului
+    qty_step = _qty_step(symbol)             # = 10**(-sz_dec)
+    price_prec = max(0, 6 - sz_dec)          # regula HL perp (idem _fmt_price)
+    tick_size = 10 ** (-price_prec) if price_prec > 0 else 1.0
     return {
-        "qty_step": tick_size if qty_step == 0 else 1 / (10 ** qty_step),
-        "qty_prec": qty_prec,
+        "qty_step": qty_step,
+        "qty_prec": sz_dec,
         "price_prec": price_prec,
-        "min_qty": min_qty,
+        "min_qty": qty_step,                 # min HL = 1 step (notional $10 e in sizing)
         "tick_size": tick_size,
     }
 
