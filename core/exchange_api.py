@@ -1086,6 +1086,12 @@ async def maker_entry_or_market(symbol:      str,
         print(f"[HL] maker_entry: no bid/ask → fallback Ioc")
         return await _place_market_internal(symbol, side, qty, reduce_only=False)
 
+    # Pozitia INAINTE de Alo — baseline pt masurarea fill-ului real din delta
+    # de pozitie la timeout (ground truth, NU openOrders care e gol post-fill).
+    pos_before = await get_position_qty_strict(coin)
+    if pos_before is None:
+        pos_before = 0.0   # entry-from-flat (cazul comun); pyramiding+API-fail = edge acceptat
+
     # Place Alo
     oid = await _place_alo(symbol, side, maker_px, qty, reduce_only=False)
     if oid is None:
@@ -1119,11 +1125,28 @@ async def maker_entry_or_market(symbol:      str,
                 "raw":        None,
             }
 
-    # Timeout: cancel + fallback on remainder
-    final_status = await _get_order_status(symbol, oid)
-    filled_so_far = (initial_qty - final_status["leavesSz"]) if final_status else 0.0
-    remainder = max(0.0, initial_qty - filled_so_far)
+    # Timeout: CANCEL INTAI (opreste orice fill — fara race intre citire si
+    # cancel), apoi masoara fill-ul REAL din DELTA DE POZITIE (ground truth).
+    # NU folosim openOrders/_get_order_status: e GOL daca Alo s-a umplut deja
+    # → ar da filled=0 → market pe qty intreg → DUBLURA mare.
     await _cancel_order(symbol, oid)
+    await asyncio.sleep(0.5)            # lasa cancel + fill-uri sa se settleze
+    pos_after = None
+    for _ in range(3):                  # retry pe blip API tranzitoriu
+        pos_after = await get_position_qty_strict(coin)
+        if pos_after is not None:
+            break
+        await asyncio.sleep(0.5)
+    if pos_after is None:
+        # Persistent API fail → NU putem sti cat a umplut. NU dam market
+        # (mai bine under-fill decat dublura). Reconcilierea defense-in-depth
+        # prinde o eventuala pozitie orfana.
+        print("[HL] maker_entry: pozitie indisponibila post-cancel — SKIP market "
+              "(anti-dublura; verifica reconcilierea)")
+        return {"result": "skip", "filled_qty": 0.0, "avg_price": maker_px,
+                "order_id": oid, "raw": None}
+    filled_so_far = max(0.0, pos_after - pos_before)
+    remainder = max(0.0, initial_qty - filled_so_far)
 
     if fallback == "skip" or remainder <= min_qty:
         # Skip market fallback — return whatever maker filled (poate 0)
