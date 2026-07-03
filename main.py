@@ -1199,7 +1199,11 @@ async def on_confirmed_bar(symbol: str, bar: dict) -> None:
         if pos is not None and pos.opened_ts_ms:
             iv_ms = nl.interval_ms(_TF_INTERVAL)
             entry_bar = nl.current_bar_open_ms(pos.opened_ts_ms, _TF_INTERVAL)
-            bars_held = max(0, int((bar["ts_ms"] - entry_bar) / iv_ms))
+            # +1: opened_ts_ms = wall-clock (~close-ul barei-semnal S = inceputul
+            # barei S+1), deci entry_bar = S+1, cu o bara in urma ancorei Pine
+            # (bara-semnal S). Fara +1, time-exit iese cu 1 bara (4h) mai tarziu
+            # decat Pine. Cu +1 → paritate exacta: Pine bars_held=k la S+k, la fel bot.
+            bars_held = max(0, int((bar["ts_ms"] - entry_bar) / iv_ms)) + 1
             pos.bars_held = bars_held      # sync field pt UI/persist
         else:
             bars_held = 0
