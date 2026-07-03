@@ -1190,12 +1190,19 @@ async def on_confirmed_bar(symbol: str, bar: dict) -> None:
     pos_dir = pos.direction.lower() if pos else None
     entry_px = pos.entry_price if pos else 0.0
 
-    # Increment bars_held pe pozitia activa (folosit la BB MR time-exit)
-    if pos is not None:
-        pos.bars_held += 1
-
     if isinstance(sig, BBMeanReversionSignal):
-        bars_held = pos.bars_held if pos else 0
+        # bars_held DERIVAT din opened_ts_ms (nr bare intre bara-entry si bara
+        # curenta), NU contor in-memory. Contorul se pierdea la restart →
+        # time-exit ratat. Derivarea e restart-proof (opened_ts_ms persistat +
+        # reconciliat la adopt) SI numara barele scurse cat botul a fost jos
+        # (ca Pine). Floor opened_ts la bar boundary pt count exact.
+        if pos is not None and pos.opened_ts_ms:
+            iv_ms = nl.interval_ms(_TF_INTERVAL)
+            entry_bar = nl.current_bar_open_ms(pos.opened_ts_ms, _TF_INTERVAL)
+            bars_held = max(0, int((bar["ts_ms"] - entry_bar) / iv_ms))
+            pos.bars_held = bars_held      # sync field pt UI/persist
+        else:
+            bars_held = 0
         decision = sig.evaluate(has_position=pos_dir, entry_price=entry_px,
                                  bars_held=bars_held)
     else:
@@ -1653,6 +1660,13 @@ async def bootstrap() -> None:
         # Scanam Bybit, dar Telegram POZITIE GASITA se trimite DUPA "BOT PORNIT"
         # (vezi mai jos) — colectam aici in _resume_announce.
         bybit_pos = await ex.fetch_open_position(sym)
+        if bybit_pos is None and _state.get_position(sym) is not None:
+            # Exchange FLAT dar state persistat avea pozitie (inchisa cat botul
+            # era jos) → curat, sa nu ramana fantoma pe care strategia o crede
+            # deschisa.
+            print(f"  [{sym}] resume: exchange flat, dar state avea pozitie "
+                  f"persistata → curat (inchisa cat botul era jos)")
+            _state.set_position(sym, None)
         if bybit_pos is not None:
             entry_px = bybit_pos["entry_price"]
             qty_real = bybit_pos["qty"]
@@ -1702,6 +1716,17 @@ async def bootstrap() -> None:
             # fetch_pnl_for_trade window la close → exclude piramidari vechi
             # inchise INAINTE de adopt).
             opened_ts = bybit_pos["created_ms"] or int(time.time() * 1000)
+            # Restart-proof time-exit: daca state persistat are o pozitie care
+            # MATCH-uieste exchange-ul (aceeasi directie + qty ~egal), pastram
+            # opened_ts_ms REAL din state. Altfel (HL n-are created_ms) opened_ts
+            # = now → time-exit s-ar reseta la fiecare restart. Mismatch → stale,
+            # folosim now.
+            _persist = _state.get_position(sym)
+            if (_persist is not None and _persist.direction == dir_real
+                    and abs(_persist.qty - qty_real) <= max(qty_real * 0.05, 1e-9)):
+                opened_ts = _persist.opened_ts_ms
+                print(f"  [{sym}] resume: opened_ts din state persistat "
+                      f"({opened_ts}) → time-exit restart-proof")
             adopt_ts = int(time.time() * 1000)
             resumed = LivePosition(
                 symbol=sym,
