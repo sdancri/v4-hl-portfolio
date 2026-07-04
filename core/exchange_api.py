@@ -431,6 +431,36 @@ async def chase_close(symbol: str, direction: str,
     return qty_final is not None and qty_final <= 1e-9
 
 
+async def _position_open_ts_from_fills(coin: str, addr: str) -> Optional[int]:
+    """Ora (ms UTC) la care s-a DESCHIS pozitia curenta, derivata din userFills.
+
+    HL nu expune createdMs in clearinghouseState. Fill-urile HL au insa
+    `startPosition` (marimea pozitiei INAINTE de fill) → fill-ul de deschidere
+    al pozitiei curente = cel mai RECENT fill (pt coin) cu startPosition ~0
+    (adica pozitia era flat inainte de el). Tot ce e mai nou = adds/reduces la
+    pozitia curenta. Robust la ordinea listei (luam max time dintre candidati).
+
+    CRITIC pt strategiile cu time-exit (BB MR) portate pe HL: fara asta, la adopt
+    opened_ts_ms cade pe fallback (now) → varsta pozitiei gresita → time-exit
+    resetat la restart. Cu asta, opened_ts_ms = ora reala fara persistenta."""
+    try:
+        fills = await _info({"type": "userFills", "user": addr})
+    except Exception:
+        return None
+    if not isinstance(fills, list):
+        return None
+    cand: list[int] = []
+    for f in fills:
+        try:
+            if (f.get("coin") or "").upper() != coin.upper():
+                continue
+            if abs(float(f.get("startPosition", 0) or 0)) < 1e-9 and f.get("time"):
+                cand.append(int(f["time"]))
+        except Exception:
+            continue
+    return max(cand) if cand else None
+
+
 async def fetch_open_position(symbol: str,
                               user: Optional[str] = None) -> Optional[dict]:
     """
@@ -461,16 +491,17 @@ async def fetch_open_position(symbol: str,
         if abs(szi) < 1e-12:
             return None
         entry = float(pos.get("entryPx", 0) or 0)
-        # HL nu expune createdMs in clearinghouseState. Cea mai apropiata
-        # aproximatie e t-ul ultimului fill. Phase B va citi userFills.
-        # Acum returnam None ca semnal "necunoscut".
+        # created_ms: derivat din userFills (HL n-are createdMs in state).
+        # None daca fills indisponibil → caller face fallback la now (adopt),
+        # NU la 0 (entry_ts=0 ar da varsta = de la epoca 0 → time-exit instant).
+        created = await _position_open_ts_from_fills(coin, addr)
         return {
             "direction":   "LONG" if szi > 0 else "SHORT",
             "entry_price": entry,
             "qty":         abs(szi),
             "sl_price":    None,
             "tp_price":    None,
-            "created_ms":  None,
+            "created_ms":  created,
         }
     return None
 
