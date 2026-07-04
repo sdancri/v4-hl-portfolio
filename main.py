@@ -1558,6 +1558,10 @@ async def bootstrap() -> None:
     # Colectam pozitiile adoptate la resume; Telegram POZITIE GASITA se trimite
     # DUPA "BOT PORNIT" (UX: user vede intai ca bot-ul s-a pornit, apoi pozitiile).
     _resume_announce: list[tuple] = []
+    # Pozitii persistate dar inchise EXTERN cat botul era jos (exchange flat la
+    # boot). Le inregistram (PnL din fills + Telegram + DB) DUPA init reporter,
+    # NU le stergem silentios. Vezi procesarea de dupa "BOT PORNIT".
+    _offline_closed: list[str] = []
 
     for pair_cfg in CONFIG.pairs:
         if not pair_cfg.enabled:
@@ -1665,12 +1669,15 @@ async def bootstrap() -> None:
         # (vezi mai jos) — colectam aici in _resume_announce.
         bybit_pos = await ex.fetch_open_position(sym)
         if bybit_pos is None and _state.get_position(sym) is not None:
-            # Exchange FLAT dar state persistat avea pozitie (inchisa cat botul
-            # era jos) → curat, sa nu ramana fantoma pe care strategia o crede
-            # deschisa.
-            print(f"  [{sym}] resume: exchange flat, dar state avea pozitie "
-                  f"persistata → curat (inchisa cat botul era jos)")
-            _state.set_position(sym, None)
+            # Exchange FLAT dar state persistat avea pozitie → inchisa EXTERN
+            # (manual/SL/TP) cat botul era jos. NU stergem silentios (s-ar pierde
+            # trade-ul din Telegram + dashboard DB). O pastram in _state si o
+            # inregistram via close_pipeline_external DUPA init reporter (PnL real
+            # din fills). Colectam aici, procesam mai jos.
+            print(f"  [{sym}] resume: exchange flat + pozitie persistata → "
+                  f"inchisa extern cat botul era jos; inregistrez close dupa init reporter.")
+            _offline_closed.append(sym)
+            continue  # nu rula adopt-ul (bybit_pos e None oricum)
         if bybit_pos is not None:
             entry_px = bybit_pos["entry_price"]
             qty_real = bybit_pos["qty"]
@@ -1786,6 +1793,28 @@ async def bootstrap() -> None:
             except Exception as e:
                 print(f"  [{sym}] reporter init FAILED ({type(e).__name__}: {e})"
                       f" — disabled pe simbol")
+
+    # Offline-close drain: pozitii persistate dar inchise EXTERN cat botul era
+    # jos (colectate in bucla de resume la _offline_closed). Le procesam ABIA
+    # AICI, DUPA init reporter — close_pipeline_external scrie in DB via
+    # _reporters.get(sym), care era None in bucla de sus (init dupa warmup).
+    # Fara acest drain, close-ul amanat s-ar pierde: trade neinregistrat (fara
+    # PnL/DB/Telegram) SI pozitie fantoma ramasa in state (record_closed_trade
+    # n-ar rula → nu s-ar curata). target_price = fallback (fills dau avg_exit
+    # real); ultimul close din warmup, altfel entry.
+    for sym in _offline_closed:
+        if _state.get_position(sym) is None:
+            continue  # deja procesata (dedup/race)
+        sig = _signals.get(sym)
+        last_close = (float(sig.df.iloc[-1]["close"])
+                      if sig is not None and len(sig.df)
+                      else _state.get_position(sym).entry_price)
+        try:
+            await close_pipeline_external(sym, exit_reason="EXTERNAL",
+                                          target_price=last_close)
+            print(f"  [{sym}] offline-close inregistrat (PnL fills + DB + Telegram)")
+        except Exception as e:
+            print(f"  [{sym}] offline-close FAILED: {e!r} — pozitia ramane in state")
 
     # Strategy register indicators (chart overlay meta)
     # HI overlays
