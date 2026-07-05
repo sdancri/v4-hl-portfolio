@@ -1370,6 +1370,17 @@ async def set_position_sl(symbol:     str,
             sl_str = _fmt_price(sl_price, coin)
             qty_str = _fmt_qty(pos["qty"], coin)
 
+            # "SET" semantics (nu "add"): sterge trigger-ele existente INAINTE de
+            # a plasa noile → set_position_sl INLOCUIESTE, nu stacuieste (altfel
+            # fiecare trailing update adauga inca un SL/TP reduce-only). Bybit
+            # e atomic (setTradingStop); pe HL SL/TP = order-e separate.
+            # cancel_all_stops = cancel_all_orders pe coin. Fereastra scurta fara
+            # SL intre cancel→place; backstop = SL software in strategie + panic.
+            try:
+                await cancel_all_stops(coin)
+            except Exception as e:
+                print(f"[HL] set_position_sl cancel_all_stops: {e!r}")
+
             sl_order_wire = {
                 "a": meta["asset_id"],
                 "b": is_buy_sl,
