@@ -567,7 +567,26 @@ async def preload_instruments(symbols: Optional[list[str]] = None) -> None:
     Daca `symbols` e dat, ridica eroare daca vreunul lipseste din universe
     (sanity check la pornire). Altfel cache-uieste TOT universe-ul.
     """
-    meta = await _info({"type": "meta"})
+    # Retry pe fetch-ul meta: e primul apel de retea la boot, iar _info n-are
+    # retry intern. Un timeout TRANZITORIU aici ar propaga necontrolat prin
+    # bootstrap → crash inainte de orice candle/indicator. Retry; ridicam DOAR
+    # la esec persistent (outage real). Meta HL e obligatorie (mapping
+    # coin→asset-id, fara fallback env) — de aceea retry, nu fallback.
+    meta: dict | list | None = None
+    last_exc: Exception | None = None
+    for i in range(4):
+        try:
+            meta = await _info({"type": "meta"})
+            break
+        except Exception as e:
+            last_exc = e
+            print(f"[HL] preload_instruments meta attempt {i+1}/4 "
+                  f"failed: {e!r}")
+            if i < 3:
+                await asyncio.sleep(2.0)
+    if meta is None:
+        raise RuntimeError(
+            f"HL meta fetch failed after 4 retries: {last_exc!r}")
     universe = meta.get("universe", [])
     if not universe:
         raise RuntimeError("HL meta endpoint returned empty universe")

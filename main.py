@@ -2167,14 +2167,33 @@ async def api_resume(token: str = ""):
 
 @app.post("/api/stop")
 async def api_stop(token: str = ""):
-    """Stop = pauza + market-close TOATE pozitiile active."""
+    """Stop = pauza + market-close TOATE pozitiile active, inregistrate IMEDIAT
+    ca DASHBOARD_STOP (close_position → PnL real din fills + DB + Telegram), NU
+    ca EXTERNAL pe bara urmatoare.
+
+    Ordinea mesajelor Telegram (model BP fe24f66): "Bot OPRIT" INAINTE de
+    "TRADE ÎNCHIS" per simbol — trimitem "Bot OPRIT" ACUM, apoi close_position
+    (care trimite "TRADE ÎNCHIS")."""
     ok, err = bc.check_token(token)
     if not ok:
         return JSONResponse({"error": err}, status_code=403)
     bc.set_paused(True)
+    active_syms = [s for s in _state.positions
+                   if _state.get_position(s) is not None]
+    # MESAJ 1 — "Bot OPRIT" INAINTE de close-uri (ordine: bot oprit → pozitii inchise).
+    try:
+        await tg.send_critical(
+            "Bot OPRIT via dashboard",
+            f"<b>Inchid pozitiile:</b> {', '.join(active_syms) if active_syms else '—'}\n"
+            f"<b>Stare:</b> PAUZAT (use /api/resume pt restart trading).",
+        )
+    except Exception:
+        pass
+    # MESAJ 2 (per simbol) — close_position inregistreaza DASHBOARD_STOP + DB +
+    # "TRADE ÎNCHIS", DUPA "Bot OPRIT".
     closed: list = []
     failed: list = []
-    for sym in list(_state.positions.keys()):
+    for sym in active_syms:
         pos = _state.get_position(sym)
         if pos is None:
             continue
@@ -2184,15 +2203,6 @@ async def api_stop(token: str = ""):
         except Exception as e:
             print(f"  [STOP {sym}] close failed: {e!r}")
             failed.append(sym)
-    try:
-        await tg.send_critical(
-            "Bot OPRIT via dashboard",
-            f"<b>Inchise:</b> {', '.join(closed) if closed else '—'}\n"
-            f"<b>Esuate:</b> {', '.join(failed) if failed else '—'}\n"
-            f"<b>Stare:</b> PAUZAT (use /api/resume pt restart trading).",
-        )
-    except Exception:
-        pass
     return {"status": "stopped", "closed": closed, "failed": failed}
 
 
