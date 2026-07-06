@@ -401,9 +401,11 @@ async def open_position(symbol: str, direction: str, close_price: float,
     # HL adapter intoarce "rejected" (NU "failed" ca Bybit) pe esec total.
     if entry_result["result"] == "rejected":
         print(f"  [OPEN {symbol}] maker_entry_or_market REJECTED")
-        await tg.send_critical(f"OPEN FAILED — {symbol}",
-                               "maker_entry_or_market returned rejected / 0 fill",
-                               symbol=symbol)
+        # WARNING, nu HALT: botul CONTINUA (niciun trade deschis, asteapta
+        # urmatorul semnal). HALT doar cand botul se opreste.
+        await tg.send_warning(f"OPEN FAILED — {symbol}",
+                              "maker_entry_or_market returned rejected / 0 fill",
+                              symbol=symbol)
         return
 
     # Pretul real de fill: pe maker pur, avg_price din ordin; pe mixed/taker,
@@ -637,7 +639,7 @@ async def _sl_retry_loop(symbol: str, sl_price: float,
             symbol=symbol,
         )
     except Exception as e:
-        print(f"  [{symbol}] SL timeout tg.send_critical failed: {e!r}")
+        print(f"  [{symbol}] SL timeout tg.send_warning failed: {e!r}")
 
 
 async def _assert_closed(symbol: str, qty_local: float,
@@ -1721,7 +1723,9 @@ async def bootstrap() -> None:
                 print(f"  [{sym}] resume: REFUZ ADOPT — Bybit qty={qty_real} "
                       f"FARA SL setat (suspect: manual sau bot fail)")
                 try:
-                    await tg.send_critical(
+                    # WARNING, nu HALT: botul CONTINUA (refuza doar sa adopte
+                    # ACEST simbol, trece la urmatorul). HALT doar cand se opreste.
+                    await tg.send_warning(
                         "POZIȚIE FĂRĂ SL — refuz adoptie",
                         f"<b>Pe Bybit:</b> {tg.dir_emoji(dir_real)} {dir_real}  "
                         f"<b>Qty:</b> <code>{qty_real}</code>  "
@@ -1739,7 +1743,7 @@ async def bootstrap() -> None:
                         symbol=sym,
                     )
                 except Exception as e:
-                    print(f"  [{sym}] resume tg.send_critical failed: {e!r}")
+                    print(f"  [{sym}] resume tg.send_warning failed: {e!r}")
                 # NU adoptam — continuam la urmatorul simbol
                 continue
 
