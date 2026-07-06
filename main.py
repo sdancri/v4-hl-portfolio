@@ -1962,50 +1962,12 @@ async def lifespan(app: FastAPI):
     enabled_symbols = [p.symbol for p in CONFIG.pairs if p.enabled]
 
     async def _on_user_event_hl_adapter(event: dict) -> None:
-        """Adapter HL userEvents → V4 on_position_event Bybit-shape.
-        HL ws_hl trimite {"kind": "fills"|"funding"|..., "data": <payload>}.
-        V4 on_position_event asteapta {"symbol": ..., "size": ..., "avgPrice": ...}.
-        Size post-fill DERIVAT din fill (startPosition ± sz), NU din REST.
-        """
-        kind = event.get("kind", "")
-        if kind != "fills":
-            # alte tipuri (funding, liq) — doar log
-            print(f"  [HL USEREV] {kind}: {str(event.get('data'))[:200]}")
-            return
-        # Size post-fill DERIVAT din fill (ground truth), NU din get_position_qty:
-        # clearinghouseState (REST) are lag → un SL/TP fill intra-bar arata pozitia
-        # inca DESCHISA (qty stale) → on_position_event vede size>0 → close-ul se
-        # pierde pana la check_external_close pe bara urmatoare (~4h). Fill-ul HL
-        # da startPosition (size SEMNAT inainte de fill) + sz + side → pozitia
-        # post-fill = startPosition ± sz; pe close complet → 0 IMEDIAT. (V4 Bybit
-        # prinde din execution event care are size; asta e echivalentul HL fara REST.)
-        fills = event.get("data") or []
-        if not isinstance(fills, list):
-            return
-        # Grupam pe coin, folosim ULTIMUL fill per coin — startPosition-ul lui
-        # reflecta fill-urile anterioare din batch → pozitia FINALA post-batch.
-        by_coin: dict[str, dict] = {}
-        for fill in fills:
-            coin = (fill.get("coin") or "").upper()
-            if coin:
-                by_coin[coin] = fill
-        for coin, fill in by_coin.items():
-            try:
-                if coin not in _signals:
-                    continue  # not our pair
-                start = float(fill.get("startPosition", 0) or 0)
-                sz = float(fill.get("sz", 0) or 0)
-                signed = sz if fill.get("side") == "B" else -sz
-                post_size = abs(start + signed)
-                avg_px = float(fill.get("px", 0) or 0)
-                await on_position_event({
-                    "symbol": coin,
-                    "size": str(post_size),
-                    "avgPrice": avg_px,
-                    "raw": fill,
-                })
-            except Exception as e:
-                print(f"  [HL USEREV] fill adapter failed: {type(e).__name__}: {e}")
+        """Logger userEvents HL. Synth-ul fill→position (size post-fill din
+        startPosition ± sz → on_position_event) se face acum in
+        hl_ws_runner._user_wrap (fill-derived, zero REST), simetric cu BP-HL
+        _on_user. Aici doar log — apelat de _user_wrap DUPA synth."""
+        print(f"  [HL USEREV] {event.get('kind','?')}: "
+              f"{str(event.get('data'))[:200]}")
 
     tasks = [
         asyncio.create_task(hl_ws_runner.public_ws_loop_hl(
@@ -2018,6 +1980,7 @@ async def lifespan(app: FastAPI):
             symbols=enabled_symbols,
             on_order_update=on_order_event,
             on_user_event=_on_user_event_hl_adapter,
+            on_position_event=on_position_event,
         )),
         asyncio.create_task(heartbeat_loop()),
         asyncio.create_task(memory_monitor(BOT_NAME, tg_alert=tg.send_critical)),

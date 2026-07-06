@@ -90,6 +90,7 @@ async def private_ws_loop_hl(
     symbols: list[str],
     on_order_update: Optional[Callable[[dict], Awaitable[None]]] = None,
     on_user_event: Optional[Callable[[dict], Awaitable[None]]] = None,
+    on_position_event: Optional[Callable[[dict], Awaitable[None]]] = None,
 ) -> None:
     """Subscribe orderUpdates + userEvents pe HL_MAIN_ADDRESS, ONE socket PER
     coin (simetric cu pattern-ul candle). HL_AGENT_PRIVATE_KEY trimite events
@@ -109,10 +110,37 @@ async def private_ws_loop_hl(
     print(f"  [HL-WS] starting {len(symbols)} events sockets (per coin) pe {user}")
 
     async def _make_events_task(coin: str) -> None:
+        async def _user_wrap(ev: dict) -> None:
+            # Synth fill→position (HL n-are channel 'position'): size post-fill
+            # DERIVAT din fill (startPosition ± sz), NU din get_position_qty.
+            # clearinghouseState (REST) are LAG → un SL/TP fill intra-bar arata
+            # pozitia inca DESCHISA (qty stale) → size>0 → close RATAT pana la
+            # bara urmatoare. Fill-ul e ground truth: post = startPosition ± sz;
+            # pe close complet → 0 IMEDIAT, zero REST. Fills deja filtrate pe
+            # self.coin in _handle_user_events (mirror BP-HL 4a49c44).
+            if on_position_event is not None and ev.get("kind") == "fills":
+                fills = ev.get("data") or []
+                if isinstance(fills, list) and fills:
+                    fill = fills[-1]   # ultimul: startPosition reflecta batch-ul
+                    try:
+                        start  = float(fill.get("startPosition", 0) or 0)
+                        sz     = float(fill.get("sz", 0) or 0)
+                        signed = sz if fill.get("side") == "B" else -sz
+                        post_size = abs(start + signed)
+                        await on_position_event({
+                            "symbol": coin, "size": str(post_size),
+                            "avgPrice": float(fill.get("px", 0) or 0), "raw": fill,
+                        })
+                    except Exception:
+                        print(f"  [HL-WS] fill→position synth {coin}:\n"
+                              f"{traceback.format_exc()}")
+            if on_user_event is not None:
+                await on_user_event(ev)
+
         ws_client = HLWebSocket(
             on_candle=None,
             on_order_update=on_order_update,
-            on_user_event=on_user_event,
+            on_user_event=_user_wrap,
             coin=coin,  # normalize_order_update filtreaza per coin
         )
         ws_client.subscribe_order_updates(user)
