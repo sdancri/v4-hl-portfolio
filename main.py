@@ -1965,35 +1965,42 @@ async def lifespan(app: FastAPI):
         """Adapter HL userEvents → V4 on_position_event Bybit-shape.
         HL ws_hl trimite {"kind": "fills"|"funding"|..., "data": <payload>}.
         V4 on_position_event asteapta {"symbol": ..., "size": ..., "avgPrice": ...}.
-        Pe fill, query Bybit-style: get_position_qty(symbol) pt size curent.
+        Size post-fill DERIVAT din fill (startPosition ± sz), NU din REST.
         """
         kind = event.get("kind", "")
         if kind != "fills":
             # alte tipuri (funding, liq) — doar log
             print(f"  [HL USEREV] {kind}: {str(event.get('data'))[:200]}")
             return
-        # Pe fill: ws_hl _handle_user_events filtreaza fills per coin (modificare
-        # V4_HL vs BP-HL upstream — fix triple-fire pe multi-pair). Asadar toate
-        # fills primite pe acest socket sunt pt coin-ul socket-ului. coins_seen
-        # dedup pe acelasi update (acelasi simbol in 2 fills consecutive in
-        # acelasi payload — rare, dar posibil pe scale-out partial).
+        # Size post-fill DERIVAT din fill (ground truth), NU din get_position_qty:
+        # clearinghouseState (REST) are lag → un SL/TP fill intra-bar arata pozitia
+        # inca DESCHISA (qty stale) → on_position_event vede size>0 → close-ul se
+        # pierde pana la check_external_close pe bara urmatoare (~4h). Fill-ul HL
+        # da startPosition (size SEMNAT inainte de fill) + sz + side → pozitia
+        # post-fill = startPosition ± sz; pe close complet → 0 IMEDIAT. (V4 Bybit
+        # prinde din execution event care are size; asta e echivalentul HL fara REST.)
         fills = event.get("data") or []
         if not isinstance(fills, list):
             return
-        coins_seen: set[str] = set()
+        # Grupam pe coin, folosim ULTIMUL fill per coin — startPosition-ul lui
+        # reflecta fill-urile anterioare din batch → pozitia FINALA post-batch.
+        by_coin: dict[str, dict] = {}
         for fill in fills:
+            coin = (fill.get("coin") or "").upper()
+            if coin:
+                by_coin[coin] = fill
+        for coin, fill in by_coin.items():
             try:
-                coin = (fill.get("coin") or "").upper()
-                if not coin or coin in coins_seen:
-                    continue
-                coins_seen.add(coin)
                 if coin not in _signals:
                     continue  # not our pair
-                qty_abs = await ex.get_position_qty(coin)
+                start = float(fill.get("startPosition", 0) or 0)
+                sz = float(fill.get("sz", 0) or 0)
+                signed = sz if fill.get("side") == "B" else -sz
+                post_size = abs(start + signed)
                 avg_px = float(fill.get("px", 0) or 0)
                 await on_position_event({
                     "symbol": coin,
-                    "size": str(qty_abs),
+                    "size": str(post_size),
                     "avgPrice": avg_px,
                     "raw": fill,
                 })
