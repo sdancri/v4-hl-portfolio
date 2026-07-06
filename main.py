@@ -1052,6 +1052,12 @@ async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
     pnl_entry_ts = pos.adopt_ts_ms if pos.adopt_ts_ms is not None else pos.opened_ts_ms
     pnl_data = await ex.fetch_pnl_for_trade(symbol, pnl_entry_ts, now_ms)
     avg_exit = pnl_data.get("avg_exit") or target_price
+    # AUTO reason (fast-path on_position_event): deducem exit_reason din pretul
+    # REAL de exit (avg_exit din fills), NU dintr-un proxy (fill px la momentul
+    # event-ului = doar ultimul fill). Direction-aware. (model BP-HL 07396fa/98b91ac)
+    if exit_reason == "AUTO":
+        exit_reason = _reason_from_exit(pos.direction, avg_exit,
+                                        pos.sl_price, pos.tp_price)
     pnl_real = pnl_data.get("pnl", 0.0)
     fees_real = pnl_data.get("fees", 0.0)
 
@@ -1295,13 +1301,33 @@ async def _fill_ws_gap(symbol: str, first_ws_ts_s: int) -> None:
 # Private WS handlers
 # ============================================================================
 
+def _reason_from_exit(direction: str, exit_px: float, sl_price: float,
+                      tp_price: Optional[float], tol: float = 0.01) -> str:
+    """Deduce exit_reason din pretul REAL de exit (avg_exit din fills), ca
+    Gate/VSE/BP-HL. DIRECTION-AWARE: LONG → SL sub (exit <= sl), TP peste
+    (exit >= tp); SHORT invers. Mid-range → EXTERNAL. Naming V4 (BYBIT_SL/
+    BYBIT_TP/EXTERNAL) pastrat pt consistenta dashboard/Telegram."""
+    if exit_px <= 0:
+        return "EXTERNAL"
+    if direction == "LONG":
+        if sl_price and exit_px <= sl_price * (1 + tol):
+            return "BYBIT_SL"
+        if tp_price and exit_px >= tp_price * (1 - tol):
+            return "BYBIT_TP"
+    else:   # SHORT
+        if sl_price and exit_px >= sl_price * (1 - tol):
+            return "BYBIT_SL"
+        if tp_price and exit_px <= tp_price * (1 + tol):
+            return "BYBIT_TP"
+    return "EXTERNAL"
+
+
 async def on_position_event(event: dict) -> None:
     """
     Detect Bybit-side close (SL/TP atomic trigger) sau external close.
 
-    Eveniment cu size=0 dupa ce local has_position → trigger close pipeline.
-    Distinctia BYBIT_SL vs BYBIT_TP se face prin avgPrice proximity to
-    sl_price vs tp_price.
+    Eveniment cu size=0 dupa ce local has_position → trigger close pipeline cu
+    exit_reason="AUTO" → dedus din avg_exit REAL in _close_pipeline_external_locked.
     """
     symbol = event.get("symbol", "")
     size = float(event.get("size", 0) or 0)
@@ -1318,16 +1344,11 @@ async def on_position_event(event: dict) -> None:
     if pos is None:
         return  # already closed locally
 
-    # Determine reason based on price proximity (sl vs tp)
-    if pos.tp_price and abs(avg - pos.tp_price) / pos.tp_price < 0.005:
-        reason = "BYBIT_TP"
-    elif abs(avg - pos.sl_price) / pos.sl_price < 0.005:
-        reason = "BYBIT_SL"
-    else:
-        reason = "EXTERNAL"
-
-    print(f"  [{symbol}] private WS detected close: avg={avg} → {reason}")
-    await close_pipeline_external(symbol, reason, target_price=avg or pos.entry_price)
+    # Fast-path: pasam "AUTO" → reason dedus din avg_exit REAL (media ponderata a
+    # fill-urilor de inchidere) in _close_pipeline_external_locked, NU dintr-un
+    # proxy (avg de aici = doar ULTIMUL fill). (model BP-HL 07396fa/98b91ac)
+    print(f"  [{symbol}] fast-path close pe fill: avg={avg} → reason AUTO (din avg_exit)")
+    await close_pipeline_external(symbol, "AUTO", target_price=avg or pos.entry_price)
 
 
 async def on_order_event(event: dict) -> None:
