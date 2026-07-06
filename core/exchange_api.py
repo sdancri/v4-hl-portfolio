@@ -1443,7 +1443,9 @@ async def set_position_sl(symbol:     str,
     if send_tg_on_fail:
         try:
             import core.telegram_bot as _tg
-            await _tg.send_critical(
+            # WARNING, nu HALT: botul continua (pozitia ruleaza, fallback software
+            # _check_sl_tp / reconcile la close). HALT doar cand se opreste.
+            await _tg.send_warning(
                 f"SL nu a putut fi setat pe {symbol}",
                 f"<b>Eroare ultima:</b> <code>{last_err}</code>\n"
                 f"<b>SL țintit:</b> <code>{sl_price}</code>\n"
