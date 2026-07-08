@@ -706,12 +706,25 @@ def _qty_prec(symbol: Optional[str] = None) -> int:
 async def get_balance() -> Optional[float]:
     """
     Alias BP-compat — returneaza total USDC tradabil (perp + spot pe Unified).
-    Folosit DOAR pt cap-ul de siguranta din position_sizing.
+    Folosit DOAR pt cap-ul de siguranta din position_sizing SI pt sync_equity
+    (shared_equity — sursa pt sizing viitoarelor trade-uri + mesajul BOT PORNIT).
+
+    Retry 4x/1s: un singur fail tranzitoriu (fara retry inainte) lasa
+    sync_equity() cu shared_equity NEACTUALIZAT (stale) → sizing viitoarelor
+    trade-uri + "Account init" calculate pe o valoare veche, potential foarte
+    diferita de soldul real (incident 2026-07-08: NEAR supradimensionat).
     """
-    try:
-        return await get_balance_usdc()
-    except Exception:
-        return None
+    last_exc: Optional[Exception] = None
+    for i in range(4):
+        try:
+            return await get_balance_usdc()
+        except Exception as e:
+            last_exc = e
+            print(f"[HL] get_balance attempt {i+1}/4 failed: {e!r}")
+            if i < 3:
+                await asyncio.sleep(1.0)
+    print(f"[HL] get_balance FAILED after 4 retries: {last_exc!r}")
+    return None
 
 
 # ---------------------------------------------------------------------------

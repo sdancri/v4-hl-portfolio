@@ -316,7 +316,24 @@ async def sync_equity(reason: str = "MANUAL") -> None:
     """
     bal = await ex.get_balance()
     if bal is None:
-        print(f"  [EQUITY-SYNC {reason}] FAILED — Bybit balance None")
+        print(f"  [EQUITY-SYNC {reason}] FAILED — HL balance None (dupa retry)")
+        # WARNING, nu HALT: botul continua, dar shared_equity ramane STALE (nu
+        # se actualizeaza) → sizing viitoarelor trade-uri + mesajele de equity
+        # (BOT PORNIT/TRADE ÎNCHIS) folosesc valoarea VECHE. Fara aceasta alerta,
+        # esecul e complet silentios (doar print in consola) — incident 2026-07-08
+        # (NEAR supradimensionat + "Account init" fals la restart, ambele din
+        # shared_equity/initial_account stale nedetectate).
+        try:
+            await tg.send_warning(
+                f"EQUITY-SYNC {reason} eșuat — echitate STALE",
+                f"<b>get_balance a eșuat</b> (după 4 reîncercări).\n"
+                f"<code>shared_equity</code> rămâne la valoarea veche: "
+                f"<code>${_state.shared_equity:,.2f}</code>\n"
+                f"Sizing trade-urilor viitoare și mesajele de cont pot fi "
+                f"INCORECTE până la următorul sync reușit.",
+            )
+        except Exception as e:
+            print(f"  [EQUITY-SYNC {reason}] tg alert failed: {e!r}")
         return
 
     prev = _state.shared_equity
