@@ -140,20 +140,25 @@ async def get_balance_usdc(user: Optional[str] = None) -> float:
     """
     Returneaza TOTAL USDC tradabil pe perp pt main wallet.
 
-    Pe HL "Unified Account" (default & recommended), USDC sta in "spot
-    balance" dar e disponibil automat ca colateral pt perps — fara
-    transfer intern. Total tradabil = perp accountValue + spot USDC.
+    BUGFIX 2026-07-08: formula veche (perp_value + spot.total) DUBLA colateralul
+    cand exista o pozitie perp deschisa. Pe HL Unified, USDC din spot e folosit
+    AUTOMAT ca margin pt perps — `spot.hold` reflecta exact suma blocata acolo,
+    care e ACEEASI suma deja continuta in `perp accountValue` (margin lockuit +
+    uPnL). Suma naiva (perp + spot.total) numara acel colateral de 2 ori →
+    echitate umflata cu ~valoarea marginii ori de cate ori exista pozitie
+    deschisa (incident 2026-07-08: $92 raportat, real ~$64 — verificat: spot.hold
+    ≈ perp.accountValue aproape exact, cu pozitie NEAR deschisa).
 
-    Breakdown:
-    - perp accountValue = collateral lockuit in pozitii + uPnL nerealizat
-    - spot USDC         = free cash, disponibil ca margin pt new entries
+    Fix: total = perp_value + spot_FREE (spot.total - spot.hold), NU spot.total
+    intreg. perp_value deja include margin lockuit + uPnL (profit SAU pierdere);
+    adaugam doar cash-ul liber din spot (nefolosit ca margin). Cand nu exista
+    pozitie deschisa, hold=0 → formula se reduce la perp_value(~0) + spot.total,
+    identic cu inainte (no-op pe cazul comun).
 
-    Suma reflecta exact "Available to Trade" pe care il vezi in HL UI.
-
-    Pe conturi Manual/Cross-separate, spot USDC NU e disponibil pt perp;
-    in acel caz `clearinghouseState.accountValue` singur e raspunsul corect.
-    Detectia se face implicit — pe Unified spot are USDC + perp poate fi 0,
-    pe Manual perp e populated singur.
+    Pe conturi Manual/Cross-separate (spot USDC NU disponibil pt perp),
+    `clearinghouseState.accountValue` singur ar fi raspunsul corect — pe acelea
+    hold ramane 0 (spot neatins de perp), deci formula de mai jos se comporta
+    identic (spot_free = spot.total).
     """
     addr = (user or HL_MAIN_ADDRESS or "").lower()
     if not addr:
@@ -166,7 +171,9 @@ async def get_balance_usdc(user: Optional[str] = None) -> float:
         spot_state = await _info({"type": "spotClearinghouseState", "user": addr})
         for bal in (spot_state or {}).get("balances", []):
             if (bal.get("coin") or "").upper() == "USDC":
-                spot_usdc = float(bal.get("total", 0))
+                spot_total = float(bal.get("total", 0))
+                spot_hold = float(bal.get("hold", 0) or 0)
+                spot_usdc = spot_total - spot_hold   # doar cash LIBER, nu tot
                 break
     except Exception:
         pass
