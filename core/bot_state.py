@@ -169,6 +169,14 @@ class BotState:
 
     def __init__(self, account_size: float = ACCOUNT_SIZE) -> None:
         self.initial_account: float = account_size
+        # Capital NOMINAL de pornire (= ACCOUNT_SIZE/pool_total, $100) — FIX,
+        # persistat, NICIODATA suprascris (nici de sync_equity, nici de load()
+        # daca lipseste doar cu default ACCOUNT_SIZE, NU cu balanta live).
+        # Spre deosebire de `initial_account` (suprascris de sync_equity la
+        # FIECARE restart cu balanta live — V4 citeste live, NU compound local
+        # ca boilerplate), `genesis_account` da "capital inițial" adevarat pt
+        # mesajul BOT PORNIT (Capital inițial FIX $100 vs Capital actual live).
+        self.genesis_account: float = ACCOUNT_SIZE
         self.shared_equity: float = account_size
         self.positions: dict[str, Optional[LivePosition]] = {}
         self.trades: list[TradeRecord] = []
@@ -206,21 +214,28 @@ class BotState:
     # ----------------------------------------------------------------
     def record_closed_trade(self, trade: TradeRecord) -> None:
         """
-        Inregistreaza trade inchis cu pnl real (deja tras de pe Bybit).
+        Inregistreaza trade inchis cu pnl real (deja tras de pe HL).
 
-        IMPORTANT: shared_equity NU se muta local prin += trade.pnl.
-        Caller-ul (main.py) face sync_equity(reason='CLOSE_<sym>') imediat
-        dupa, care OVERWRITE shared_equity = balance real Bybit. Asta e
-        single source of truth pentru equity (modelul Ichimoku, nu compound
-        local ca boilerplate).
+        Equity-ul se calculeaza LOCAL (model BP-HL, NU mai citeste balanta live):
+            self.shared_equity += trade.pnl     # nimic tras din balance-ul HL!
+
+        Balanta live (ex.get_balance) ramane folosita DOAR la entry, pt cap-ul
+        de siguranta (vezi open_position) — NU pt sizing-ul de baza si NU pt
+        equity-ul raportat. Schimbat 2026-07-08 dupa incidentul NEAR (sizing pe
+        shared_equity live-sync stale/dublu-numarat) — compound local elimina
+        dependenta de un balance-fetch corect la fiecare sync.
         """
         trade.id = len(self.trades) + 1
         self.trades.append(trade)
-        # equity_curve point e adaugat de sync_equity (care e apelat dupa)
+        self.shared_equity += trade.pnl                # local compute — NU balanta HL
+        self.equity_curve.append({
+            "time":  trade.exit_ts_ms // 1000,          # ms -> s
+            "value": round(self.shared_equity, 4),
+        })
         # Free position slot
         self.positions[trade.symbol] = None
         print(f"  [STATE] Trade #{trade.id} {trade.symbol} {trade.direction} "
-              f"PnL=${trade.pnl:+,.2f}  (equity update via sync_equity)")
+              f"PnL=${trade.pnl:+,.2f}  shared_equity_local=${self.shared_equity:,.2f}")
 
     # ----------------------------------------------------------------
     # Indicators (overlay chart)
@@ -256,10 +271,10 @@ class BotState:
     def summary(self) -> dict:
         n = len(self.trades)
         wins = sum(1 for t in self.trades if t.pnl > 0)
-        pnl_total = self.shared_equity - self.initial_account
-        ret_pct = (pnl_total / self.initial_account * 100) if self.initial_account else 0.0
+        pnl_total = self.shared_equity - self.genesis_account
+        ret_pct = (pnl_total / self.genesis_account * 100) if self.genesis_account else 0.0
         return {
-            "initial_account": round(self.initial_account, 2),
+            "initial_account": round(self.genesis_account, 2),
             "account": round(self.shared_equity, 2),
             "pnl_total": round(pnl_total, 2),
             "return_pct": round(ret_pct, 2),
@@ -305,6 +320,7 @@ class BotState:
         with self._lock:
             data = {
                 "initial_account": self.initial_account,
+                "genesis_account": self.genesis_account,
                 "shared_equity": self.shared_equity,
                 "trades": [t.to_persist() for t in self.trades],
                 "equity_curve": list(self.equity_curve),
@@ -345,6 +361,10 @@ class BotState:
             return
 
         self.initial_account = data.get("initial_account", self.initial_account)
+        # genesis_account: FIX la $100 (ACCOUNT_SIZE) daca lipseste din state.json
+        # vechi (pre-fix) — NU la self.genesis_account curent (ar fi acelasi
+        # default oricum) si NU la o balanta live (genesis = nominal, nu real).
+        self.genesis_account = data.get("genesis_account", ACCOUNT_SIZE)
         self.shared_equity = data.get("shared_equity", self.initial_account)
         self.trades = [TradeRecord.from_dict(t) for t in data.get("trades", [])]
         self.equity_curve = data.get("equity_curve", []) or self.equity_curve

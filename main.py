@@ -302,66 +302,6 @@ def _build_trade_extra(pos: LivePosition) -> dict:
 # Equity sync (INIT / CLOSE / HEARTBEAT)
 # ============================================================================
 
-async def sync_equity(reason: str = "MANUAL") -> None:
-    """
-    Bot Ichimoku citeste balance DIRECT de pe Bybit — single source of truth.
-    NU tine equity local prin compound (account += pnl) ca boilerplate.
-
-    La fiecare sync (INIT/CLOSE/HEARTBEAT):
-      - Pull balance real Bybit
-      - OVERWRITE _state.shared_equity = balance
-      - Append punct in equity_curve (pt chart)
-      - Anomaly detect: daca delta vs ultimul sync e neasteptat (>3%
-        fara trade inchis recent), alerta Telegram.
-    """
-    bal = await ex.get_balance()
-    if bal is None:
-        print(f"  [EQUITY-SYNC {reason}] FAILED — HL balance None (dupa retry)")
-        # WARNING, nu HALT: botul continua, dar shared_equity ramane STALE (nu
-        # se actualizeaza) → sizing viitoarelor trade-uri + mesajele de equity
-        # (BOT PORNIT/TRADE ÎNCHIS) folosesc valoarea VECHE. Fara aceasta alerta,
-        # esecul e complet silentios (doar print in consola) — incident 2026-07-08
-        # (NEAR supradimensionat + "Account init" fals la restart, ambele din
-        # shared_equity/initial_account stale nedetectate).
-        try:
-            await tg.send_warning(
-                f"EQUITY-SYNC {reason} eșuat — echitate STALE",
-                f"<b>get_balance a eșuat</b> (după 4 reîncercări).\n"
-                f"<code>shared_equity</code> rămâne la valoarea veche: "
-                f"<code>${_state.shared_equity:,.2f}</code>\n"
-                f"Sizing trade-urilor viitoare și mesajele de cont pot fi "
-                f"INCORECTE până la următorul sync reușit.",
-            )
-        except Exception as e:
-            print(f"  [EQUITY-SYNC {reason}] tg alert failed: {e!r}")
-        return
-
-    prev = _state.shared_equity
-    _state.shared_equity = bal
-
-    if reason == "INIT":
-        _state.initial_account = bal
-        _state.equity_curve.clear()
-        _state.equity_curve.append({
-            "time": int(time.time()), "value": round(bal, 4),
-        })
-        print(f"  [EQUITY-SYNC INIT] account = ${bal:,.2f} (Bybit balance)")
-        return
-
-    # Append equity point — chart shows actual Bybit balance over time
-    _state.equity_curve.append({
-        "time": int(time.time()), "value": round(bal, 4),
-    })
-    if len(_state.equity_curve) > 50000:
-        _state.equity_curve.pop(0)
-
-    delta_pct = abs(bal - prev) / prev * 100 if prev > 0 else 0
-    print(f"  [EQUITY-SYNC {reason}] prev=${prev:,.2f}  bybit=${bal:,.2f}  "
-          f"delta={delta_pct:.2f}%")
-    log_event("equity_sync", reason=reason, prev=prev, bybit=bal,
-              delta_pct=delta_pct)
-
-
 # ============================================================================
 # Order pipeline
 # ============================================================================
@@ -920,7 +860,7 @@ async def _close_position_locked(symbol: str, exit_reason: str,
             # pnl_pct = % din initial_account (consistent cu BP — referential
             # equity, NU notional). Dashboard agreghaza pnl_pct across boti
             # asumand acelasi numitor.
-            init_acc = _state.initial_account
+            init_acc = _state.genesis_account
             pnl_pct = ((trade.pnl / init_acc * 100) if init_acc else None)
             # side: lowercase "long"/"short" (conventie dashboard, aceeasi ca
             # open_side din heartbeat). Try/except TypeError = backwards-compat
@@ -945,8 +885,8 @@ async def _close_position_locked(symbol: str, exit_reason: str,
     else:
         sign = tg.pnl_emoji(pnl_real)
 
-    ret_pct = ((_state.shared_equity - _state.initial_account)
-               / _state.initial_account * 100) if _state.initial_account else 0
+    ret_pct = ((_state.shared_equity - _state.genesis_account)
+               / _state.genesis_account * 100) if _state.genesis_account else 0
     # PnL label: cand fallback estimat (closed-pnl neindexat), aratam clar
     # ca nu e PnL Bybit real → user sti ca cifra e aproximativa.
     pnl_label = ("estimat — closed-pnl neindexat" if pnl_estimated
@@ -977,9 +917,6 @@ async def _close_position_locked(symbol: str, exit_reason: str,
                          "equity_point": eq_point})
     except Exception as e:
         print(f"  [CLOSE {symbol}] broadcast failed (best-effort): {e!r}")
-
-    # Post-close equity sync
-    await sync_equity(reason=f"CLOSE_{symbol}")
 
 
 # ============================================================================
@@ -1115,7 +1052,7 @@ async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
             # pnl_pct = % din initial_account (consistent cu BP — referential
             # equity, NU notional). Dashboard agreghaza pnl_pct across boti
             # asumand acelasi numitor.
-            init_acc = _state.initial_account
+            init_acc = _state.genesis_account
             pnl_pct = ((trade.pnl / init_acc * 100) if init_acc else None)
             # side: lowercase "long"/"short" (conventie dashboard, aceeasi ca
             # open_side din heartbeat). Try/except TypeError = backwards-compat
@@ -1135,8 +1072,8 @@ async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
     # Icon ⚠️ pe EXTERNAL: defense-in-depth a sintetizat close-ul (Bybit a
     # inchis fara stiinta strategiei — verifica de ce). Altfel pnl_emoji.
     sign = "⚠️" if exit_reason == "EXTERNAL" else tg.pnl_emoji(pnl_real)
-    ret_pct = ((_state.shared_equity - _state.initial_account)
-               / _state.initial_account * 100) if _state.initial_account else 0
+    ret_pct = ((_state.shared_equity - _state.genesis_account)
+               / _state.genesis_account * 100) if _state.genesis_account else 0
     # Best-effort: tg + broadcast nu blocheaza state cleanup.
     try:
         await tg.send(
@@ -1160,7 +1097,6 @@ async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
                          "equity_point": eq_point})
     except Exception as e:
         print(f"  [CLOSE-EXT {symbol}] broadcast failed (best-effort): {e!r}")
-    await sync_equity(reason=f"CLOSE_{symbol}")
 
 
 # ============================================================================
@@ -1442,10 +1378,6 @@ async def heartbeat_loop() -> None:
         next_close = _next_bar_close_ms(now_ms)
         sleep_s = max(1, (next_close - 60_000 - now_ms) / 1000)
         await asyncio.sleep(sleep_s)
-        try:
-            await sync_equity(reason="HEARTBEAT")
-        except Exception as e:
-            print(f"  [HEARTBEAT] sync failed: {e}")
         _send_reporter_heartbeat()
 
 
@@ -1809,8 +1741,10 @@ async def bootstrap() -> None:
             # Stocam datele pentru Telegram dupa "BOT PORNIT"
             _resume_announce.append((sym, pair_cfg, resumed))
 
-    # INIT equity sync
-    await sync_equity(reason="INIT")
+    # NU mai exista sync_equity(INIT): shared_equity e compound local (model
+    # BP-HL), deja corect din _state.load() (persistat) — nu se re-citeste
+    # balanta live la boot. Prima pornire vreodata (fara state.json) porneste
+    # de la genesis_account (ACCOUNT_SIZE) via BotState.__init__.
 
     # Init bot_reporter per pereche (dashboard agregat). Fail-safe: orice eroare
     # → reporter dezactivat pe acel simbol, restul continua. Disable explicit
@@ -1890,13 +1824,20 @@ async def bootstrap() -> None:
         f"⏰ <b>Pornit initial:</b> <code>{tg.fmt_time(_state.start_utc)}</code>\n"
         f"🔄 <b>Restart la:</b>     <code>{tg.fmt_time(restart_at)}</code>\n"
     )
+    # Capital actual + % diferenta fata de genesis (💚 pozitiv / ❤️ negativ;
+    # Telegram HTML n-are culoare text → inima verde/rosie). (model BP-HL cf29de2)
+    _cap_pct = ((_state.shared_equity - _state.genesis_account)
+                / _state.genesis_account * 100) if _state.genesis_account else 0.0
+    _cap_pct_str = (f" (💚 +{_cap_pct:.1f}%)" if _cap_pct > 0
+                    else f" (❤️ {_cap_pct:.1f}%)" if _cap_pct < 0 else "")
     await tg.send(
         "BOT PORNIT ✅ (multi-pair)",
-        f"🧠 <b>Strategies:</b>   <code>multi (BB MR + Hull+Ichimoku)</code>\n"
-        f"🪙 <b>Pairs:</b>        {pairs_label}\n"
-        f"📊 <b>Account init:</b> <code>${_state.initial_account:,.2f}</code>\n"
+        f"🧠 <b>Strategies:</b>      <code>multi (BB MR + Hull+Ichimoku)</code>\n"
+        f"🪙 <b>Pairs:</b>           {pairs_label}\n"
+        f"📊 <b>Capital inițial:</b> <code>${_state.genesis_account:,.2f}</code>\n"
+        f"💰 <b>Capital actual:</b>  <code>${_state.shared_equity:,.2f}</code>{_cap_pct_str}\n"
         f"{time_lines}"
-        f"🌐 <b>Chart:</b>        port <code>{CHART_HOST_PORT}</code>",
+        f"🌐 <b>Chart:</b>           port <code>{CHART_HOST_PORT}</code>",
     )
 
     # Eveniment dashboard (linie verticala pe equity chart):
@@ -2057,8 +1998,8 @@ async def lifespan(app: FastAPI):
         for t in tasks:
             t.cancel()
         try:
-            ret_pct = ((_state.shared_equity - _state.initial_account)
-                       / _state.initial_account * 100) if _state.initial_account else 0
+            ret_pct = ((_state.shared_equity - _state.genesis_account)
+                       / _state.genesis_account * 100) if _state.genesis_account else 0
             await tg.send(
                 "BOT OPRIT 🛑",
                 f"🧠 <b>Strategies:</b> <code>multi (BB MR + Hull+Ichimoku)</code>\n"
