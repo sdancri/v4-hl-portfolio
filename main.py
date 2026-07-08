@@ -511,7 +511,7 @@ async def open_position(symbol: str, direction: str, close_price: float,
             f"<b>Direcție:</b> {direction}  "
             f"<b>Entry:</b> <code>{ex.smart_price(real_fill_price)}</code>  "
             f"<b>SL:</b> <code>{sl_price}</code>\n"
-            f"SL pe partea greșită / ≤0 — NU îl armez pe Bybit (ar închide "
+            f"SL pe partea greșită / ≤0 — NU îl armez pe HL (ar închide "
             f"instant). Poziția rulează pe fallback software. Verifică strategia.",
             symbol=symbol,
         )
@@ -611,7 +611,7 @@ async def _sl_retry_loop(symbol: str, sl_price: float,
                 await tg.send(
                     "✅ SL setat cu întârziere",
                     f"🛑 <b>set_position_sl</b> a reușit după <code>{elapsed}s</code> "
-                    f"de reîncercări.\nPoziția e protejată acum și Bybit-side.",
+                    f"de reîncercări.\nPoziția e protejată acum și HL-side.",
                     symbol=symbol,
                 )
             except Exception:
@@ -633,7 +633,7 @@ async def _sl_retry_loop(symbol: str, sl_price: float,
             f"<b>set_position_sl A EȘUAT</b> după <code>{elapsed}s</code> de reîncercări\n"
             f"🛑 <b>SL:</b> <code>{sl_str}</code>\n"
             f"{tp_line}"
-            f"<b>Poziția rulează FĂRĂ protecție Bybit-side.</b>\n"
+            f"<b>Poziția rulează FĂRĂ protecție HL-side.</b>\n"
             f"Fallback software: SL_LONG/SHORT pe bară confirmed → close_position. "
             f"Reconcilierea la primul close va force chase_close dacă e cazul.",
             symbol=symbol,
@@ -660,8 +660,8 @@ async def _assert_closed(symbol: str, qty_local: float,
     await tg.send_critical(
         f"{symbol} chase_close esuat ({reason_label})",
         f"<b>Qty locală:</b> {qty_local}\n"
-        f"<b>Qty Bybit după închidere:</b> {qty_after}\n"
-        f"chase_close nu a putut inchide pozitia (Bybit down sau order respins). "
+        f"<b>Qty HL după închidere:</b> {qty_after}\n"
+        f"chase_close nu a putut inchide pozitia (HL down sau order respins). "
         f"Bot oprit pe acest simbol. Verifică manual și restart.",
         symbol=symbol,
     )
@@ -719,7 +719,7 @@ async def _reconcile_close(symbol: str, direction: str,
         await tg.send_critical(
             f"{symbol} reconciliere {exit_reason}",
             f"<b>Qty locală:</b> {qty_local}\n"
-            f"<b>Qty Bybit:</b> {qty_real}\n"
+            f"<b>Qty HL:</b> {qty_real}\n"
             f"<b>Exit reason:</b> {exit_reason}\n"
             f"Bot oprit pe acest simbol. Verifică manual și restart.",
             symbol=symbol,
@@ -932,7 +932,7 @@ async def _close_position_locked(symbol: str, exit_reason: str,
     # PnL label: cand fallback estimat (closed-pnl neindexat), aratam clar
     # ca nu e PnL Bybit real → user sti ca cifra e aproximativa.
     pnl_label = ("estimat — closed-pnl neindexat" if pnl_estimated
-                 else "Bybit real, fees incluse")
+                 else "HL real, fees incluse")
     # Best-effort tg.send + broadcast — daca pica, trade-ul ramane corect
     # inregistrat in _state (pipeline-ul nu cade pe notification failure).
     try:
@@ -992,7 +992,7 @@ async def check_external_close(symbol: str) -> bool:
             print(f"  [{symbol}] RECONCILE HALT: {msg}")
             await tg.send_critical(
                 f"{symbol} qty desync",
-                f"<b>Local:</b> {pos.qty}\n<b>Bybit:</b> {qty_real}\n"
+                f"<b>Local:</b> {pos.qty}\n<b>HL:</b> {qty_real}\n"
                 f"Bot HALTED pe simbol. Verifică manual.",
                 symbol=symbol,
             )
@@ -1128,7 +1128,7 @@ async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
             f"<b>Exit:</b>  <code>{ex.smart_price(avg_exit)}</code>  "
             f"(<code>{exit_reason}</code>)  (<code>{tg.fmt_time(now_ms)}</code>)\n"
             f"{tg.pnl_emoji(pnl_real)} <b>PnL:</b> <code>${pnl_real:+,.2f}</code>  "
-            f"({'estimat — closed-pnl neindexat' if pnl_estimated else 'Bybit real, fees incluse'})\n"
+            f"({'estimat — closed-pnl neindexat' if pnl_estimated else 'HL real, fees incluse'})\n"
             f"📊 <b>Account:</b> <code>${_state.shared_equity:,.2f}</code>  |  "
             f"<b>Return:</b> <code>{ret_pct:+.2f}%</code>",
             symbol=symbol,
@@ -1682,7 +1682,7 @@ async def bootstrap() -> None:
                     f"<b>get_kline</b> returnează 0 bare după 4 reîncercări "
                     f"(~17s total).\n"
                     f"<b>Stare bot:</b> simbolul e HALTAT — restul perechilor "
-                    f"rulează normal.\nVerifică connectivitate Bybit și redeploy.",
+                    f"rulează normal.\nVerifică connectivitate HL și redeploy.",
                     symbol=sym,
                 )
             except Exception:
@@ -1727,13 +1727,13 @@ async def bootstrap() -> None:
                     # ACEST simbol, trece la urmatorul). HALT doar cand se opreste.
                     await tg.send_warning(
                         "POZIȚIE FĂRĂ SL — refuz adoptie",
-                        f"<b>Pe Bybit:</b> {tg.dir_emoji(dir_real)} {dir_real}  "
+                        f"<b>Pe HL:</b> {tg.dir_emoji(dir_real)} {dir_real}  "
                         f"<b>Qty:</b> <code>{qty_real}</code>  "
                         f"<b>Entry:</b> <code>{ex.smart_price(entry_px)}</code>\n"
-                        f"<b>SL Bybit:</b> <code>NESETAT</code>\n"
+                        f"<b>SL HL:</b> <code>NESETAT</code>\n"
                         f"\n"
                         f"<b>Acțiune:</b>\n"
-                        f"  1. Setează SL manual pe Bybit App (recomandat: "
+                        f"  1. Setează SL manual pe HL (recomandat: "
                         f"entry × (1 ± <code>{pair_cfg.effective_sl_pct*100:.1f}%</code>)),\n"
                         f"  2. SAU închide poziția manual,\n"
                         f"  3. Apoi redeploy bot.\n"
@@ -2139,7 +2139,7 @@ async def api_pause(token: str = ""):
     try:
         await tg.send_warning(
             "Bot pauzat via dashboard",
-            "Pozitiile EXISTENTE raman protejate de SL/TP atomic Bybit-side. "
+            "Pozitiile EXISTENTE raman protejate de SL/TP atomic HL-side. "
             "Nu se mai deschid pozitii noi pana la /api/resume.",
         )
     except Exception:
