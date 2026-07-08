@@ -125,6 +125,54 @@ def install_asyncio_exception_handler() -> None:
         pass
 
 
+async def supervise(
+    name:         str,
+    coro_factory: Callable[[], Awaitable[None]],
+    tg_alert:     Optional[Callable[[str, str], Awaitable[None]]] = None,
+    max_backoff:  float = 60.0,
+) -> None:
+    """Supervisor restart-on-death pentru un task de fundal (WS etc.).
+
+    Ruleaza `coro_factory()`; daca task-ul MOARE (raise) sau returneaza (o bucla
+    WS infinita n-ar trebui sa returneze) → alerta Telegram cu traceback COMPLET
+    + auto-restart cu backoff exponential (cap `max_backoff`). Doua beneficii:
+      - prinzi cauza data viitoare (traceback in alerta, nu pierdut la GC),
+      - auto-vindecare (nu mai sta ore cu WS mort).
+
+    tg_alert: foloseste `send_warning` — NU HALT (botul se auto-vindeca prin
+    restart, deci NU s-a oprit). CancelledError propaga (shutdown legit — NU
+    restarta). Wrap fiecare task de fundal in lifespan:
+        asyncio.create_task(supervise("hl_ws", _ws_task, tg_alert=tg.send_warning))
+    """
+    import html as _html
+    backoff = 1.0
+    while True:
+        died_tb: Optional[str] = None
+        try:
+            await coro_factory()
+        except asyncio.CancelledError:
+            raise   # shutdown legit — nu restarta
+        except Exception:
+            died_tb = traceback.format_exc()
+        if died_tb:
+            print(f"  [SUPERVISOR] {name} A MURIT — restart în {backoff:.0f}s:\n"
+                  f"{died_tb}", flush=True)
+            if tg_alert is not None:
+                try:
+                    await tg_alert(
+                        f"WS task '{name}' a murit — auto-restart",
+                        f"Botul se auto-vindecă (restart în ~{backoff:.0f}s).\n"
+                        f"<pre>{_html.escape(died_tb[-1400:])}</pre>",
+                    )
+                except Exception as e:
+                    print(f"  [SUPERVISOR] {name} tg alert failed: {e}", flush=True)
+        else:
+            print(f"  [SUPERVISOR] {name} a returnat (n-ar trebui) — "
+                  f"restart în {backoff:.0f}s", flush=True)
+        await asyncio.sleep(backoff)
+        backoff = min(backoff * 2, max_backoff)
+
+
 async def memory_monitor(
     bot_name:           str,
     tg_alert:           Optional[Callable[[str, str], Awaitable[None]]] = None,

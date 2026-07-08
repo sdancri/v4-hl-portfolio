@@ -81,6 +81,7 @@ from core.monitoring import (
     install_asyncio_exception_handler,
     install_signal_handlers,
     memory_monitor,
+    supervise,
 )
 from core.position_sizing import compute_position_size, compute_qty
 from strategies.bb_mr_signal import BBMeanReversionSignal, BBMRConfig
@@ -1997,23 +1998,33 @@ async def lifespan(app: FastAPI):
         print(f"  [HL USEREV] {event.get('kind','?')}: "
               f"{str(event.get('data'))[:200]}")
 
+    # Task-urile de fundal ruleaza sub `supervise`: daca un task MOARE (exceptie
+    # in afara buclei interne de reconnect — cauza incidentului NEAR 07-08, WS
+    # mort silentios ore intregi, fara Telegram, fara restart), primesti Telegram
+    # cu traceback + auto-restart (nu mai sta cu WS mort). WARNING, nu HALT —
+    # se auto-vindeca. (model BP-HL 9398eb9)
     tasks = [
-        asyncio.create_task(hl_ws_runner.public_ws_loop_hl(
+        asyncio.create_task(supervise("hl_public_ws", lambda: hl_ws_runner.public_ws_loop_hl(
             symbols=enabled_symbols,
             interval_str=_TF_INTERVAL,
             on_confirmed_bar=_on_confirmed_bar_hl,
             on_unconfirmed_bar=_on_unconfirmed_bar_hl,
-        )),
-        asyncio.create_task(hl_ws_runner.private_ws_loop_hl(
+        ), tg_alert=tg.send_warning)),
+        asyncio.create_task(supervise("hl_private_ws", lambda: hl_ws_runner.private_ws_loop_hl(
             symbols=enabled_symbols,
             on_order_update=on_order_event,
             on_user_event=_on_user_event_hl_adapter,
             on_position_event=on_position_event,
-        )),
-        asyncio.create_task(heartbeat_loop()),
-        asyncio.create_task(memory_monitor(BOT_NAME, tg_alert=tg.send_warning)),
-        asyncio.create_task(periodic_reporter_heartbeat()),
-        asyncio.create_task(agent_expiration_monitor()),
+        ), tg_alert=tg.send_warning)),
+        asyncio.create_task(supervise("heartbeat", heartbeat_loop,
+                                      tg_alert=tg.send_warning)),
+        asyncio.create_task(supervise("memory_monitor",
+            lambda: memory_monitor(BOT_NAME, tg_alert=tg.send_warning),
+            tg_alert=tg.send_warning)),
+        asyncio.create_task(supervise("reporter_heartbeat", periodic_reporter_heartbeat,
+                                      tg_alert=tg.send_warning)),
+        asyncio.create_task(supervise("agent_expiry", agent_expiration_monitor,
+                                      tg_alert=tg.send_warning)),
     ]
     try:
         yield
