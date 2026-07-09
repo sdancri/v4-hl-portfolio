@@ -26,6 +26,10 @@ services:
       #          HL_WS_URL=wss://api.hyperliquid-testnet.xyz/ws
       - HL_BASE_URL=${HL_BASE_URL:-}
       - HL_WS_URL=${HL_WS_URL:-}
+      # Override explicit pt chain ID EIP-712 (mainnet|testnet). Gol → fallback
+      # pe heuristica substring "testnet" in HL_BASE_URL. Seteaza explicit daca
+      # HL_BASE_URL e un URL custom/proxy fara "testnet" in string.
+      - HL_NETWORK=${HL_NETWORK:-}
       # Agent expiration check + watchdog (cheia agent HL expira la 180 zile).
       # Boot check + watchdog ZILNIC mesaj sub WARN_DAYS pana se regenereaza.
       - AGENT_EXPIRY_WARN_DAYS=${AGENT_EXPIRY_WARN_DAYS:-14}
