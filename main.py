@@ -1004,6 +1004,17 @@ async def close_pipeline_external(symbol: str, exit_reason: str,
 async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
                                             target_price: float, pos) -> None:
     """Body close_pipeline_external, executat sub _close_locks[symbol]."""
+    # OCO manual: SL si TP sunt 2 trigger-e INDEPENDENTE pe HL (grouping "na",
+    # NU auto-OCO). Cand unul se declanseaza server-side si inchide pozitia
+    # (calea asta — external/fast-path detection), FRATELE ramane orfan pe
+    # carte pana la urmatorul entry, cand ar putea declansa gresit pe pozitia
+    # noua. _close_position_locked (calea activa) are deja acest cancel; calea
+    # EXTERNA (asta) nu trecea prin el — gol real. (model BP-HL c511dd8)
+    try:
+        await ex.cancel_all_stops(symbol)
+    except Exception as e:
+        print(f"  [CLOSE-EXT {symbol}] cancel_all_stops best-effort failed: {e!r}")
+
     await asyncio.sleep(1.5)  # let closed-pnl index
     now_ms = int(time.time() * 1000)
     # PnL window: adopt_ts_ms (daca pozitia a fost adoptata la resume) ALTFEL
@@ -1643,17 +1654,60 @@ async def bootstrap() -> None:
         # trades + equity). Single source of truth pt pozitii active = Bybit.
         # Scanam Bybit, dar Telegram POZITIE GASITA se trimite DUPA "BOT PORNIT"
         # (vezi mai jos) — colectam aici in _resume_announce.
-        bybit_pos = await ex.fetch_open_position(sym)
+        try:
+            bybit_pos = await ex.fetch_open_position(sym)
+        except Exception as e:
+            # Blip API tranzitoriu la boot NU trebuie sa crape tot bootstrap-ul
+            # SI NU trebuie tratat ca "flat" (ar phantom-inchide o pozitie VIE →
+            # risc dublu-expunere daca strategia re-intra pe semnal). Skip acest
+            # simbol — starea persistata ramane neatinsa, se re-verifica normal
+            # la runtime (check_external_close pe bara urmatoare). (model BP-Gate
+            # #3 phantom offline-close, adaptat: aici gap-ul era lipsa try/except.)
+            print(f"  [{sym}] resume: fetch_open_position EXCEPTION ({e!r}) — "
+                  f"API incert, SKIP resume pt acest simbol (stare persistata neatinsa)")
+            continue
         if bybit_pos is None and _state.get_position(sym) is not None:
-            # Exchange FLAT dar state persistat avea pozitie → inchisa EXTERN
-            # (manual/SL/TP) cat botul era jos. NU stergem silentios (s-ar pierde
-            # trade-ul din Telegram + dashboard DB). O pastram in _state si o
-            # inregistram via close_pipeline_external DUPA init reporter (PnL real
-            # din fills). Colectam aici, procesam mai jos.
-            print(f"  [{sym}] resume: exchange flat + pozitie persistata → "
-                  f"inchisa extern cat botul era jos; inregistrez close dupa init reporter.")
-            _offline_closed.append(sym)
-            continue  # nu rula adopt-ul (bybit_pos e None oricum)
+            # Exchange (raspuns normal) zice FLAT, dar avem pozitie persistata.
+            # NU presupunem offline-close direct: un raspuns 200 OK cu payload
+            # gol/malformat (glitch tranzitoriu, NU exceptie) ar produce acelasi
+            # None — phantom-close pe o pozitie VIE (audit BP-Gate #3). Confirmam
+            # STRICT multi-attempt inainte de a trata ca inchisa cu adevarat.
+            confirmed = await ex.confirm_position_closed(sym, attempts=3, delay=1.5)
+            if confirmed is None:
+                print(f"  [{sym}] resume: confirm_position_closed API incert dupa "
+                      f"3 incercari — NU presupun offline-close (risc dublu-expunere). "
+                      f"SKIP, stare persistata neatinsa.")
+                continue
+            if confirmed is False:
+                # Anomalie: fetch initial a zis flat, dar confirm zice INCA
+                # deschisa. Re-incercam fetch o data — daca reuseste acum,
+                # cade prin la adopt normal mai jos (NU offline-close).
+                print(f"  [{sym}] resume: ANOMALIE — fetch initial flat dar "
+                      f"confirm_position_closed zice INCA deschisa. Re-fetch...")
+                try:
+                    bybit_pos = await ex.fetch_open_position(sym)
+                except Exception as e:
+                    bybit_pos = None
+                    print(f"  [{sym}] resume: re-fetch dupa anomalie a EȘUAT "
+                          f"({e!r}) — SKIP, stare persistata neatinsa.")
+                    continue
+                if bybit_pos is None:
+                    print(f"  [{sym}] resume: re-fetch tot None dupa anomalie — "
+                          f"SKIP, stare persistata neatinsa.")
+                    continue
+                # bybit_pos populat acum → NU continue, cade la blocul de adopt
+                # normal de mai jos (if bybit_pos is not None).
+            else:
+                # confirmed True — genuinely flat. Inchisa EXTERN (manual/SL/TP)
+                # cat botul era jos. NU stergem silentios (s-ar pierde trade-ul
+                # din Telegram + dashboard DB). O pastram in _state si o
+                # inregistram via close_pipeline_external DUPA init reporter
+                # (PnL real din fills). Colectam aici, procesam mai jos.
+                print(f"  [{sym}] resume: exchange flat (confirmat) + pozitie "
+                      f"persistata → inchisa extern cat botul era jos; "
+                      f"inregistrez close dupa init reporter.")
+                _offline_closed.append(sym)
+                continue
         if bybit_pos is not None:
             entry_px = bybit_pos["entry_price"]
             qty_real = bybit_pos["qty"]
