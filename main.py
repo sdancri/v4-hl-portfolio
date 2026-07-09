@@ -1766,6 +1766,36 @@ async def bootstrap() -> None:
                 # NU adoptam — continuam la urmatorul simbol
                 continue
 
+            # STRAT 2 — Refuz adopt daca SL e pe partea GRESITA (LONG sl>=entry /
+            # SHORT sl<=entry). Entry-ul valideaza geometria (validate_sl); adopt-ul
+            # nu o facea — un SL inversat (bug/interventie manuala/mis-read) s-ar
+            # declansa INSTANT la primul tick → pierdere silentioasa + Telegram
+            # misleading. NU enforc distanta [sl_min,sl_max] — SL live (ex trailing
+            # mutat) poate fi legitim in afara bounds. (port din BP-HL 52230b6)
+            if (dir_real == "LONG" and sl_real >= entry_px) or \
+               (dir_real == "SHORT" and sl_real <= entry_px):
+                print(f"  [{sym}] resume: REFUZ ADOPT — SL geometrie GRESITA "
+                      f"(sl={sl_real} vs entry={entry_px}, dir={dir_real})")
+                try:
+                    await tg.send_warning(
+                        "SL PE PARTEA GREȘITĂ — refuz adoptie",
+                        f"<b>Pe HL:</b> {tg.dir_emoji(dir_real)} {dir_real}  "
+                        f"<b>Entry:</b> <code>{ex.smart_price(entry_px)}</code>  "
+                        f"<b>SL:</b> <code>{ex.smart_price(sl_real)}</code>\n"
+                        f"SL-ul e pe partea GREȘITĂ față de entry — s-ar declanșa "
+                        f"INSTANT la primul tick.\n"
+                        f"\n"
+                        f"<b>Acțiune:</b> verifică manual poziția pe HL, "
+                        f"(corectează SL sau închide), apoi redeploy bot.\n"
+                        f"\n"
+                        f"<b>Stare bot:</b> NU adoptă local. Strategia poate "
+                        f"genera trade nou pe semnal — risc dublă-poziție.",
+                        symbol=sym,
+                    )
+                except Exception as e:
+                    print(f"  [{sym}] resume tg.send_warning failed: {e!r}")
+                continue
+
             # Bybit are SL → adoptie normala
             pos_usd = qty_real * entry_px
             risk_usd = pos_usd * pair_cfg.effective_sl_pct
