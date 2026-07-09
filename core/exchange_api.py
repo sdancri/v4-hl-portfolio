@@ -51,6 +51,19 @@ from eth_account import Account
 # ---------------------------------------------------------------------------
 
 HL_BASE_URL = (os.getenv("HL_BASE_URL") or "https://api.hyperliquid.xyz").rstrip("/")
+# Reteaua pt semnare EIP-712 — chain ID difera mainnet vs testnet. Detectia
+# DOAR prin substring "testnet" in URL e fragila: un URL custom/proxy/vanity
+# fara "testnet" dar care pointeaza spre testnet → semnatura pe chain gresit →
+# TOATE ordinele respinse. De-aia HL_NETWORK explicit (mainnet|testnet) are
+# prioritate; heuristica pe URL ramane doar fallback cand env-ul nu e setat.
+# (model BP-HL — regresie fata de referinta, portat acum)
+_hl_net = os.getenv("HL_NETWORK", "").strip().lower()
+if _hl_net in ("mainnet", "main"):
+    HL_IS_MAINNET = True
+elif _hl_net in ("testnet", "test"):
+    HL_IS_MAINNET = False
+else:
+    HL_IS_MAINNET = "testnet" not in HL_BASE_URL
 HL_MAIN_ADDRESS = (os.getenv("HL_MAIN_ADDRESS") or "").strip().lower()
 HL_AGENT_PRIVATE_KEY = (os.getenv("HL_AGENT_PRIVATE_KEY") or "").strip()
 HL_AGENT_ADDRESS_EXPECTED = (os.getenv("HL_AGENT_ADDRESS") or "").strip().lower()
@@ -838,7 +851,6 @@ async def _sign_and_post(action: dict, vault_address: Optional[str] = None) -> d
     from hyperliquid.utils.signing import sign_l1_action
 
     nonce = _next_nonce()
-    is_mainnet = "testnet" not in HL_BASE_URL
 
     # SDK semneaza action; vault_address None pentru trade ca main wallet
     signature = sign_l1_action(
@@ -847,7 +859,7 @@ async def _sign_and_post(action: dict, vault_address: Optional[str] = None) -> d
         active_pool=vault_address,
         nonce=nonce,
         expires_after=None,
-        is_mainnet=is_mainnet,
+        is_mainnet=HL_IS_MAINNET,
     )
 
     payload = {

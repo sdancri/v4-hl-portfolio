@@ -279,7 +279,7 @@ def _estimate_pnl_fallback(direction: str, entry_price: float, qty: float,
     """
     sign_dir = 1 if direction == "LONG" else -1
     gross = (exit_price - entry_price) * qty * sign_dir
-    taker_rate = float(os.getenv("TAKER_FEE_RATE", "0.00055"))
+    taker_rate = float(os.getenv("TAKER_FEE_RATE", "0.00045"))  # HL taker 0.045%
     fees_est = (entry_price + exit_price) * qty * taker_rate
     return round(gross - fees_est, 4), round(fees_est, 4)
 
@@ -329,6 +329,21 @@ async def open_position(symbol: str, direction: str, close_price: float,
     balance = await ex.get_balance()
     if balance is None:
         balance = _state.shared_equity
+        # WARNING (nu HALT): botul continua cu shared_equity ca fallback pt cap
+        # (mai putin sigur — cap-ul e menit sa protejeze exact impotriva unei
+        # shared_equity gresite). Alerta pierduta la eliminarea sync_equity()
+        # (dde71f3/953e04b) — singurul loc ramas unde get_balance() se citeste
+        # live; fara ea, esecul cap-ului e complet silentios.
+        try:
+            await tg.send_warning(
+                f"get_balance eșuat la entry {symbol} — cap pe shared_equity",
+                f"<b>get_balance a eșuat</b> (după 4 reîncercări).\n"
+                f"Cap-ul de siguranță folosește <code>shared_equity</code> local "
+                f"(${_state.shared_equity:,.2f}) în loc de balanța reală HL.",
+                symbol=symbol,
+            )
+        except Exception as e:
+            print(f"  [OPEN {symbol}] tg alert (get_balance fail) failed: {e!r}")
     sizing = compute_position_size(
         pair_cfg, _state.shared_equity, balance,
         CONFIG.portfolio, leverage=pair_cfg.leverage,
@@ -1275,20 +1290,20 @@ def _reason_from_exit(direction: str, exit_px: float, sl_price: float,
                       tp_price: Optional[float], tol: float = 0.01) -> str:
     """Deduce exit_reason din pretul REAL de exit (avg_exit din fills), ca
     Gate/VSE/BP-HL. DIRECTION-AWARE: LONG → SL sub (exit <= sl), TP peste
-    (exit >= tp); SHORT invers. Mid-range → EXTERNAL. Naming V4 (BYBIT_SL/
-    BYBIT_TP/EXTERNAL) pastrat pt consistenta dashboard/Telegram."""
+    (exit >= tp); SHORT invers. Mid-range → EXTERNAL. Naming HL_SL/HL_TP/
+    EXTERNAL (botul ruleaza pe Hyperliquid, nu Bybit — vezi user-facing text)."""
     if exit_px <= 0:
         return "EXTERNAL"
     if direction == "LONG":
         if sl_price and exit_px <= sl_price * (1 + tol):
-            return "BYBIT_SL"
+            return "HL_SL"
         if tp_price and exit_px >= tp_price * (1 - tol):
-            return "BYBIT_TP"
+            return "HL_TP"
     else:   # SHORT
         if sl_price and exit_px >= sl_price * (1 - tol):
-            return "BYBIT_SL"
+            return "HL_SL"
         if tp_price and exit_px <= tp_price * (1 + tol):
-            return "BYBIT_TP"
+            return "HL_TP"
     return "EXTERNAL"
 
 
@@ -1828,28 +1843,6 @@ async def bootstrap() -> None:
                 print(f"  [{sym}] reporter init FAILED ({type(e).__name__}: {e})"
                       f" — disabled pe simbol")
 
-    # Offline-close drain: pozitii persistate dar inchise EXTERN cat botul era
-    # jos (colectate in bucla de resume la _offline_closed). Le procesam ABIA
-    # AICI, DUPA init reporter — close_pipeline_external scrie in DB via
-    # _reporters.get(sym), care era None in bucla de sus (init dupa warmup).
-    # Fara acest drain, close-ul amanat s-ar pierde: trade neinregistrat (fara
-    # PnL/DB/Telegram) SI pozitie fantoma ramasa in state (record_closed_trade
-    # n-ar rula → nu s-ar curata). target_price = fallback (fills dau avg_exit
-    # real); ultimul close din warmup, altfel entry.
-    for sym in _offline_closed:
-        if _state.get_position(sym) is None:
-            continue  # deja procesata (dedup/race)
-        sig = _signals.get(sym)
-        last_close = (float(sig.df.iloc[-1]["close"])
-                      if sig is not None and len(sig.df)
-                      else _state.get_position(sym).entry_price)
-        try:
-            await close_pipeline_external(sym, exit_reason="EXTERNAL",
-                                          target_price=last_close)
-            print(f"  [{sym}] offline-close inregistrat (PnL fills + DB + Telegram)")
-        except Exception as e:
-            print(f"  [{sym}] offline-close FAILED: {e!r} — pozitia ramane in state")
-
     # Strategy register indicators (chart overlay meta)
     # HI overlays
     _state.register_indicator("hull_n1", color="#ff8c00", line_width=2)
@@ -1927,6 +1920,30 @@ async def bootstrap() -> None:
             )
         except Exception as e:
             print(f"  [{sym}] resume tg.send failed (best-effort): {e!r}")
+
+    # Offline-close drain: pozitii persistate dar inchise EXTERN cat botul era
+    # jos (colectate in bucla de resume la _offline_closed). Le procesam ABIA
+    # AICI — DUPA init reporter (close_pipeline_external scrie in DB via
+    # _reporters.get(sym), care era None in bucla de sus, init dupa warmup) SI
+    # DUPA "BOT PORNIT" (ordine UX: user vede intai ca bot-ul a pornit, apoi
+    # "TRADE ÎNCHIS" pt pozitiile inchise extern — nu invers). Fara acest drain,
+    # close-ul amanat s-ar pierde: trade neinregistrat (fara PnL/DB/Telegram)
+    # SI pozitie fantoma ramasa in state (record_closed_trade n-ar rula → nu
+    # s-ar curata). target_price = fallback (fills dau avg_exit real); ultimul
+    # close din warmup, altfel entry.
+    for sym in _offline_closed:
+        if _state.get_position(sym) is None:
+            continue  # deja procesata (dedup/race)
+        sig = _signals.get(sym)
+        last_close = (float(sig.df.iloc[-1]["close"])
+                      if sig is not None and len(sig.df)
+                      else _state.get_position(sym).entry_price)
+        try:
+            await close_pipeline_external(sym, exit_reason="EXTERNAL",
+                                          target_price=last_close)
+            print(f"  [{sym}] offline-close inregistrat (PnL fills + DB + Telegram)")
+        except Exception as e:
+            print(f"  [{sym}] offline-close FAILED: {e!r} — pozitia ramane in state")
 
 
 # ============================================================================
