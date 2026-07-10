@@ -33,6 +33,7 @@ publica/citeste din state.db).
 from __future__ import annotations
 
 import asyncio
+import hmac
 import os
 import threading
 
@@ -55,6 +56,9 @@ def check_token(token: str) -> tuple[bool, str]:
     expected = (os.getenv("RESET_TOKEN", "") or "").strip()
     if not expected:
         return False, "RESET_TOKEN not configured on bot"
-    if token != expected:
+    # Constant-time compare — evita timing side-channel (chiar daca threat model
+    # e reteaua interna `bots`, compare_digest e gratis). .encode() → bytes ca
+    # sa nu arunce pe eventuale non-ASCII. (port din BP 38528a6/ca8c948)
+    if not hmac.compare_digest(token.encode(), expected.encode()):
         return False, "Invalid token"
     return True, ""
