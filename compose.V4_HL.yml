@@ -34,6 +34,12 @@ services:
       # Boot check + watchdog ZILNIC mesaj sub WARN_DAYS pana se regenereaza.
       - AGENT_EXPIRY_WARN_DAYS=${AGENT_EXPIRY_WARN_DAYS:-14}
       - AGENT_EXPIRY_CHECK_INTERVAL_SEC=${AGENT_EXPIRY_CHECK_INTERVAL_SEC:-86400}
+      # genesis_account (Capital inițial) + baseline shared_equity la primul boot
+      # FARA state.json persistat. Dupa primul boot: genesis_account NICIODATA
+      # suprascris (vezi core/bot_state.py); shared_equity persista din state.
+      # Fara linia asta explicit, Portainer NU poate transmite valoarea reala
+      # in container (env lipsa din environment: = default 100.0 mereu).
+      - ACCOUNT_SIZE=${ACCOUNT_SIZE:-100.0}
       - TELEGRAM_TOKEN=${TELEGRAM_TOKEN:-}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
       - TZ=Europe/Bucharest
