@@ -80,9 +80,15 @@ async def public_ws_loop_hl(
     tasks = [asyncio.create_task(_make_task(s)) for s in symbols]
     try:
         await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
+    except BaseException:
+        # BaseException (nu doar CancelledError) — o exceptie generica scapata
+        # dintr-un task per-coin (in teorie imposibil, HLWebSocket.run() prinde
+        # deja tot intern, dar defensiv) trebuie sa anuleze si siblings, altfel
+        # supervise() respawn-eaza tot grupul si task-urile vechi ramase LIVE
+        # devin conexiuni WS orfane duplicate pe simbolurile care mai mergeau.
         for t in tasks:
-            t.cancel()
+            if not t.done():
+                t.cancel()
         raise
 
 
@@ -151,7 +157,13 @@ async def private_ws_loop_hl(
     tasks = [asyncio.create_task(_make_events_task(s)) for s in symbols]
     try:
         await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
+    except BaseException:
+        # BaseException (nu doar CancelledError) — o exceptie generica scapata
+        # dintr-un task per-coin (in teorie imposibil, HLWebSocket.run() prinde
+        # deja tot intern, dar defensiv) trebuie sa anuleze si siblings, altfel
+        # supervise() respawn-eaza tot grupul si task-urile vechi ramase LIVE
+        # devin conexiuni WS orfane duplicate pe simbolurile care mai mergeau.
         for t in tasks:
-            t.cancel()
+            if not t.done():
+                t.cancel()
         raise

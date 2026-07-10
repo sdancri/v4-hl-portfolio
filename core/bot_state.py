@@ -15,10 +15,11 @@ Persistenta:
   - RESET_TOKEN env (schimbarea valorii forteaza wipe la urmatorul start)
 
 Equity contract:
-  shared_equity NU se interogheaza din Bybit — local compute:
+  shared_equity NU se interogheaza din HL — local compute:
       shared_equity = initial + sum(trade.pnl_real for trade in closed)
-  Sync cu Bybit balance se face DOAR la INIT (set initial = balance) si dupa
-  fiecare close (audit ±3% drift, alerta Telegram daca diverge).
+  initial = genesis_account (ACCOUNT_SIZE), fixat la primul boot si NICIODATA
+  suprascris ulterior. Balanta HL live se citeste DOAR la entry, ca safety
+  cap pe sizing (vezi open_position) — nu re-sincronizeaza shared_equity.
 """
 from __future__ import annotations
 

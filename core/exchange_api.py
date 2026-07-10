@@ -186,7 +186,10 @@ async def get_balance_usdc(user: Optional[str] = None) -> float:
             if (bal.get("coin") or "").upper() == "USDC":
                 spot_total = float(bal.get("total", 0))
                 spot_hold = float(bal.get("hold", 0) or 0)
-                spot_usdc = spot_total - spot_hold   # doar cash LIBER, nu tot
+                # max(0, ...) — clamp defensiv: daca hold > total tranzitoriu
+                # (rounding/settlement-timing edge case), evita delta negativ
+                # care ar subestima balanta (model BP-HL).
+                spot_usdc = max(0.0, spot_total - spot_hold)   # doar cash LIBER
                 break
     except Exception:
         pass
@@ -1371,10 +1374,10 @@ async def set_position_sl(symbol:     str,
     BP-compat signature (incl. max_retries + send_tg_on_fail). Plaseaza
     trigger order reduce-only pt SL pe pozitia activa.
 
-    V4_HL EXTENDS BP-HL: cand tp_price > 0, plaseaza ATOMIC si trigger TP
-    (tpsl="tp") in acelasi action ca SL → AMBELE trigger orders sub o singura
-    semnatura. SL fail blocheaza retry, TP fail = warning + continue (TP nu e
-    critic safety).
+    Cand tp_price > 0, plaseaza ATOMIC si trigger TP (tpsl="tp") in acelasi
+    action ca SL → AMBELE trigger orders sub o singura semnatura (model
+    BP-HL nativ, nu extensie V4). SL fail blocheaza retry, TP fail = warning
+    + continue (TP nu e critic safety).
 
     `max_retries`: 4 default (Layer 1 retry). 1 = fail-fast (Layer 0/Layer 2 calls).
     `send_tg_on_fail`: True trimite Telegram critical pe esec final (SL).

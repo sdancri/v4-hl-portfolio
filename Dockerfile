@@ -1,7 +1,7 @@
 FROM python:3.12-slim AS base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        tzdata curl gcc python3-dev libssl-dev \
+        tzdata curl \
     && rm -rf /var/lib/apt/lists/*
 
 ENV TZ=Europe/Bucharest \
