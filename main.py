@@ -764,11 +764,18 @@ async def close_position(symbol: str, exit_reason: str,
             print(f"  [CLOSE {symbol}] no position — skip (already closed by other coroutine)")
             return
         # Dedup explicit: daca un trade cu acelasi entry_ts deja inregistrat.
+        # Curatam pozitia local chiar si pe dedup — altfel ramane FANTOMA
+        # permanent (opened_ts_ms nu se schimba niciodata, deci ORICE close
+        # ulterior — semnal, WS fast-path, reconciliere — ar re-lovi acelasi
+        # dedup la infinit, fara Telegram/DB/curatare; incident live 2026-07-11
+        # V4 Bybit TIAUSDT stuck open dupa close manual — acelasi cod aici).
         for existing in reversed(_state.trades):
             if (existing.symbol == symbol
                     and existing.entry_ts_ms == pos.opened_ts_ms):
                 print(f"  [CLOSE {symbol}] dedup: trade entry_ts={pos.opened_ts_ms} "
-                      f"deja inregistrat (id={existing.id}) — skip duplicate")
+                      f"deja inregistrat (id={existing.id}) — skip duplicate, "
+                      f"curat pozitia stale local")
+                _state.set_position(symbol, None)
                 return
         await _close_position_locked(symbol, exit_reason, target_price, pos)
 
@@ -1007,11 +1014,16 @@ async def close_pipeline_external(symbol: str, exit_reason: str,
         if pos is None:
             print(f"  [CLOSE-EXT {symbol}] no position — skip (already closed)")
             return
+        # Curatam pozitia local chiar si pe dedup — altfel ramane FANTOMA
+        # permanent (vezi close_position pentru detaliu complet; incident live
+        # 2026-07-11 V4 Bybit TIAUSDT stuck open dupa close manual pe Bybit).
         for existing in reversed(_state.trades):
             if (existing.symbol == symbol
                     and existing.entry_ts_ms == pos.opened_ts_ms):
                 print(f"  [CLOSE-EXT {symbol}] dedup: trade entry_ts="
-                      f"{pos.opened_ts_ms} deja inregistrat (id={existing.id}) — skip")
+                      f"{pos.opened_ts_ms} deja inregistrat (id={existing.id}) — "
+                      f"skip, curat pozitia stale local")
+                _state.set_position(symbol, None)
                 return
         await _close_pipeline_external_locked(symbol, exit_reason, target_price, pos)
 
