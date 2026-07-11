@@ -55,7 +55,7 @@ services:
       - RATE_LIMIT_BURST=${RATE_LIMIT_BURST:-10}
       - WS_ZOMBIE_TIMEOUT=${WS_ZOMBIE_TIMEOUT:-90}
       - MEM_MON_INTERVAL_SEC=${MEM_MON_INTERVAL_SEC:-300}
-      - MEM_MON_RSS_ALERT_MB=${MEM_MON_RSS_ALERT_MB:-320}
+      - MEM_MON_RSS_ALERT_MB=${MEM_MON_RSS_ALERT_MB:-560}
       # Dashboard control (acelasi setup ca V4 Bybit; partajeaza state.db)
       - BOT_CONTROL_URL=${BOT_CONTROL_URL:-http://V4_HL:8204}
       - BOT_REPORTER_DB=${BOT_REPORTER_DB:-/dashboard/state.db}
@@ -79,8 +79,8 @@ services:
       timeout: 5s
       retries: 3
       start_period: 45s
-    mem_limit: 384m
-    memswap_limit: 512m
+    mem_limit: 640m
+    memswap_limit: 1024m
     logging:
       driver: "json-file"
       options:
