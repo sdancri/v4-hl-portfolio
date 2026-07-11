@@ -19,6 +19,7 @@ NU face apeluri reale catre HL. Verifica doar structura codului.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from pathlib import Path
@@ -371,6 +372,22 @@ try:
           len([p for p in main.CONFIG.pairs if p.enabled]) == 3)
     check("FastAPI app constructed",
           main.app is not None and main.app.title.startswith("v4"))
+
+    # Regression BP-HL / BP 8f404ca: _halted[sym]=True TREBUIE sa
+    # scurt-circuiteze on_confirmed_bar INAINTE de orice acces la
+    # _signals[sym] — altfel un simbol halted la refuz-adopt ar STIVUI un
+    # trade nou pe next bar peste pozitia neprotejata. _signals nu e populat
+    # fara bootstrap() → daca halt-check-ul nu opreste PRIMUL, ar arunca
+    # KeyError (proof-of-reach).
+    main._halted["BTC"] = True
+    try:
+        asyncio.run(main.on_confirmed_bar("BTC", {"ts": 0, "close": 1.0}))
+        check("on_confirmed_bar respecta _halted (nu atinge _signals)", True)
+    except KeyError:
+        check("on_confirmed_bar respecta _halted (nu atinge _signals)", False,
+              detail="a trecut de halt-check pana la _signals[sym] — regresie 8f404ca")
+    finally:
+        del main._halted["BTC"]
 except Exception as e:
     check("main.py", False, repr(e))
 

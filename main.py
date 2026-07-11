@@ -1731,19 +1731,21 @@ async def bootstrap() -> None:
             tp_real  = bybit_pos["tp_price"]
             has_bybit_sl = sl_real is not None and sl_real > 0
 
-            # STRAT 1 — Refuz adopt daca Bybit NU are SL setat.
+            # STRAT 1 — Refuz adopt daca HL NU are SL setat.
             # Scenariu suspect: cineva a deschis manual SAU bot anterior a
             # esuat la set_position_sl + reconcilierile au omis. NU adoptam
             # local — alerta CRITICA, user decide (close manual sau add SL pe
-            # Bybit App, apoi restart). Strategia continua in stadiul "no
-            # position" si poate genera trade nou pe semnal — risc dublu-pozitie
-            # pe care user trebuie sa-l gestioneze manual.
+            # HL, apoi restart). HALT simbolul (_halted[sym]=True) — altfel
+            # on_confirmed_bar ar continua sa evalueze semnale si ar STIVUI
+            # un trade nou peste pozitia neprotejata de pe HL (port BP-HL —
+            # gap identic cu BP Bybit 8f404ca, doar Telegram avertiza, nu halta).
             if not has_bybit_sl:
-                print(f"  [{sym}] resume: REFUZ ADOPT — Bybit qty={qty_real} "
+                print(f"  [{sym}] resume: REFUZ ADOPT — HL qty={qty_real} "
                       f"FARA SL setat (suspect: manual sau bot fail)")
                 try:
-                    # WARNING, nu HALT: botul CONTINUA (refuza doar sa adopte
-                    # ACEST simbol, trece la urmatorul). HALT doar cand se opreste.
+                    # WARNING, nu HALT-alert (dar simbolul E halted mai jos):
+                    # niciun alt simbol nu e afectat. HALT doar cand botul chiar
+                    # se opreste ca proces — aici doar simbolul sta pe loc.
                     await tg.send_warning(
                         "POZIȚIE FĂRĂ SL — refuz adoptie",
                         f"<b>Pe HL:</b> {tg.dir_emoji(dir_real)} {dir_real}  "
@@ -1757,12 +1759,13 @@ async def bootstrap() -> None:
                         f"  2. SAU închide poziția manual,\n"
                         f"  3. Apoi redeploy bot.\n"
                         f"\n"
-                        f"<b>Stare bot:</b> NU adoptă local. Strategia poate "
-                        f"genera trade nou pe semnal — risc dublă-poziție.",
+                        f"<b>Stare bot:</b> simbolul e HALTAT — NU va genera "
+                        f"trade nou pana la redeploy. Restul perechilor ruleaza normal.",
                         symbol=sym,
                     )
                 except Exception as e:
                     print(f"  [{sym}] resume tg.send_warning failed: {e!r}")
+                _halted[sym] = True
                 # NU adoptam — continuam la urmatorul simbol
                 continue
 
@@ -1771,7 +1774,10 @@ async def bootstrap() -> None:
             # nu o facea — un SL inversat (bug/interventie manuala/mis-read) s-ar
             # declansa INSTANT la primul tick → pierdere silentioasa + Telegram
             # misleading. NU enforc distanta [sl_min,sl_max] — SL live (ex trailing
-            # mutat) poate fi legitim in afara bounds. (port din BP-HL 52230b6)
+            # mutat) poate fi legitim in afara bounds. HALT simbolul — altfel
+            # on_confirmed_bar ar STIVUI un trade nou peste pozitia neprotejata.
+            # (port din BP-HL 52230b6 — BP-HL avea deja halt-ul, portul initial
+            # V4-HL l-a omis; corectat acum, aliniat cu BP Bybit 8f404ca)
             if (dir_real == "LONG" and sl_real >= entry_px) or \
                (dir_real == "SHORT" and sl_real <= entry_px):
                 print(f"  [{sym}] resume: REFUZ ADOPT — SL geometrie GRESITA "
@@ -1788,12 +1794,13 @@ async def bootstrap() -> None:
                         f"<b>Acțiune:</b> verifică manual poziția pe HL, "
                         f"(corectează SL sau închide), apoi redeploy bot.\n"
                         f"\n"
-                        f"<b>Stare bot:</b> NU adoptă local. Strategia poate "
-                        f"genera trade nou pe semnal — risc dublă-poziție.",
+                        f"<b>Stare bot:</b> simbolul e HALTAT — NU va genera "
+                        f"trade nou pana la redeploy. Restul perechilor ruleaza normal.",
                         symbol=sym,
                     )
                 except Exception as e:
                     print(f"  [{sym}] resume tg.send_warning failed: {e!r}")
+                _halted[sym] = True
                 continue
 
             # Bybit are SL → adoptie normala
