@@ -732,6 +732,41 @@ async def _reconcile_close(symbol: str, direction: str,
     return forced_reason
 
 
+def _dedup_and_record_trade(trade: TradeRecord) -> bool:
+    """
+    Dedup pe (symbol, entry_ts_ms) + record, intr-un singur pas — chemat DOAR
+    de langa _state.record_closed_trade (nu la intrarea in close_position/
+    close_pipeline_external). Model exact BP main_multi.py record_closed_trade:
+    dedup-ul e o proprietate a PASULUI DE RECORD, nu a intregului pipeline de
+    close (place_market/reconcile ruleaza NECONDITIONAT, ca la BP — dedup-ul
+    nu trebuie sa le gateze).
+
+    Previne double-record cand 2 cai concurente (semnal + WS fast-path /
+    defense-in-depth) ajung sa inregistreze ACELASI close. Curata pozitia
+    local NECONDITIONAT (dedup sau record real) — la BP, caller-ul (strategy
+    _close()/on_candle) face clear_active_position()/_in_trade=False dupa
+    ORICE return non-exceptie din record_closed_trade, indiferent de dedup.
+    Fara curatarea neconditionata, un dedup-hit lasa pozitia FANTOMA
+    PERMANENT: opened_ts_ms nu se schimba niciodata, deci ORICE close ulterior
+    re-loveste acelasi dedup la infinit (incident live 2026-07-11, V4 Bybit
+    TIAUSDT stuck open dupa close manual pe Bybit — acelasi cod aici).
+
+    Returneaza True daca a inregistrat efectiv (caller trimite Telegram/
+    reporter/broadcast), False daca a fost dedup (caller doar salveaza+return).
+    """
+    existing = next((t for t in reversed(_state.trades)
+                      if t.symbol == trade.symbol
+                      and t.entry_ts_ms == trade.entry_ts_ms), None)
+    if existing is not None:
+        print(f"  [RECORD {trade.symbol}] dedup: trade entry_ts={trade.entry_ts_ms} "
+              f"deja inregistrat (id={existing.id}) — skip duplicate, "
+              f"curat pozitia stale local")
+        _state.set_position(trade.symbol, None)
+        return False
+    _state.record_closed_trade(trade)
+    return True
+
+
 async def close_position(symbol: str, exit_reason: str,
                           target_price: float) -> None:
     """
@@ -753,9 +788,12 @@ async def close_position(symbol: str, exit_reason: str,
     check_external_close — acelea folosesc close_pipeline_external (qty=0
     deja confirmat, reconciliere redundanta).
 
-    Concurrent safety: lock + dedup pe entry_ts_ms previn double-record cand
-    Bybit fileaza SL/TP atomic in paralel (private WS task triggereaza si
-    close_pipeline_external pentru acelasi trade).
+    Concurrent safety: lock previne race pe acelasi simbol. Dedup pe
+    entry_ts_ms NU mai e aici (era gresit sa gateze place_market/reconcile) —
+    traiește langa _state.record_closed_trade, in _dedup_and_record_trade
+    (model BP main_multi.py record_closed_trade: dedup + curatare pozitie
+    decuplate de restul pipeline-ului, exact langa recordare, nu la intrarea
+    in functie).
     """
     async with _get_close_lock(symbol):
         pos = _state.get_position(symbol)
@@ -763,20 +801,6 @@ async def close_position(symbol: str, exit_reason: str,
             # Inchis deja de un alt coroutine (private WS / defense-in-depth).
             print(f"  [CLOSE {symbol}] no position — skip (already closed by other coroutine)")
             return
-        # Dedup explicit: daca un trade cu acelasi entry_ts deja inregistrat.
-        # Curatam pozitia local chiar si pe dedup — altfel ramane FANTOMA
-        # permanent (opened_ts_ms nu se schimba niciodata, deci ORICE close
-        # ulterior — semnal, WS fast-path, reconciliere — ar re-lovi acelasi
-        # dedup la infinit, fara Telegram/DB/curatare; incident live 2026-07-11
-        # V4 Bybit TIAUSDT stuck open dupa close manual — acelasi cod aici).
-        for existing in reversed(_state.trades):
-            if (existing.symbol == symbol
-                    and existing.entry_ts_ms == pos.opened_ts_ms):
-                print(f"  [CLOSE {symbol}] dedup: trade entry_ts={pos.opened_ts_ms} "
-                      f"deja inregistrat (id={existing.id}) — skip duplicate, "
-                      f"curat pozitia stale local")
-                _state.set_position(symbol, None)
-                return
         await _close_position_locked(symbol, exit_reason, target_price, pos)
 
 
@@ -872,8 +896,10 @@ async def _close_position_locked(symbol: str, exit_reason: str,
         pnl=pnl_real, fees=fees_real,
         extra=extra,
     )
-    _state.record_closed_trade(trade)
+    recorded = _dedup_and_record_trade(trade)
     _state.save()
+    if not recorded:
+        return
     log_event("trade_closed", **trade.to_dict())
     # Dashboard: record trade closed (best-effort, exceptia nu blocheaza).
     reporter = _reporters.get(symbol)
@@ -1005,26 +1031,16 @@ async def close_pipeline_external(symbol: str, exit_reason: str,
     Variant a close_position pt cazul cand pozitia NU mai e pe Bybit (deja
     inchisa extern). Skip place_market, doar fetch PnL + record + notify.
 
-    Concurrent safety: lock + dedup pe entry_ts_ms (acelasi mecanism ca
-    close_position) — apelat din private WS si din check_external_close
-    (defense-in-depth public WS); ambele pot observa qty=0 simultan.
+    Concurrent safety: lock previne race pe acelasi simbol. Dedup pe
+    entry_ts_ms traiește langa _state.record_closed_trade, in
+    _dedup_and_record_trade (vezi close_position pentru detaliu complet —
+    model BP main_multi.py record_closed_trade).
     """
     async with _get_close_lock(symbol):
         pos = _state.get_position(symbol)
         if pos is None:
             print(f"  [CLOSE-EXT {symbol}] no position — skip (already closed)")
             return
-        # Curatam pozitia local chiar si pe dedup — altfel ramane FANTOMA
-        # permanent (vezi close_position pentru detaliu complet; incident live
-        # 2026-07-11 V4 Bybit TIAUSDT stuck open dupa close manual pe Bybit).
-        for existing in reversed(_state.trades):
-            if (existing.symbol == symbol
-                    and existing.entry_ts_ms == pos.opened_ts_ms):
-                print(f"  [CLOSE-EXT {symbol}] dedup: trade entry_ts="
-                      f"{pos.opened_ts_ms} deja inregistrat (id={existing.id}) — "
-                      f"skip, curat pozitia stale local")
-                _state.set_position(symbol, None)
-                return
         await _close_pipeline_external_locked(symbol, exit_reason, target_price, pos)
 
 
@@ -1080,8 +1096,10 @@ async def _close_pipeline_external_locked(symbol: str, exit_reason: str,
         pnl=pnl_real, fees=fees_real,
         extra=extra,
     )
-    _state.record_closed_trade(trade)
+    recorded = _dedup_and_record_trade(trade)
     _state.save()
+    if not recorded:
+        return
     log_event("trade_closed", **trade.to_dict())
     # Dashboard: record trade closed (best-effort, exceptia nu blocheaza).
     reporter = _reporters.get(symbol)

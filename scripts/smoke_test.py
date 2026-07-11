@@ -388,6 +388,36 @@ try:
               detail="a trecut de halt-check pana la _signals[sym] — regresie 8f404ca")
     finally:
         del main._halted["BTC"]
+
+    # Regression incident live 2026-07-11 (TIAUSDT stuck open): dedup-hit in
+    # _dedup_and_record_trade TREBUIE sa curete _state.positions[symbol],
+    # altfel pozitia ramane FANTOMA permanent (model BP main_multi.py:
+    # record_closed_trade e dedup-safe, caller curata neconditionat).
+    main._state.set_position("BTC", LivePosition(
+        symbol="BTC", side="Buy", direction="LONG",
+        qty=1.0, entry_price=100.0, sl_price=96.0, tp_price=105.0,
+        leverage=10, pos_usd=100.0, risk_usd=4.0, opened_ts_ms=123456,
+    ))
+    main._state.trades.append(TradeRecord(
+        id=999, symbol="BTC", direction="LONG",
+        entry_ts_ms=123456, entry_price=100.0, sl_price=96.0, tp_price=105.0,
+        qty=1.0, exit_ts_ms=124000, exit_price=105.0, exit_price_target=105.0,
+        exit_reason="TP", pnl=5.0, fees=0.05,
+    ))
+    try:
+        dup_trade = TradeRecord(
+            id=0, symbol="BTC", direction="LONG",
+            entry_ts_ms=123456, entry_price=100.0, sl_price=96.0, tp_price=105.0,
+            qty=1.0, exit_ts_ms=999999, exit_price=101.0, exit_price_target=101.0,
+            exit_reason="AUTO", pnl=1.0, fees=0.01,
+        )
+        recorded = main._dedup_and_record_trade(dup_trade)
+        check("_dedup_and_record_trade returneaza False pe dedup",
+              recorded is False)
+        check("_dedup_and_record_trade curata pozitia stale pe dedup-hit",
+              main._state.get_position("BTC") is None)
+    finally:
+        main._state.trades.pop()  # scoate trade-ul de test (id=999)
 except Exception as e:
     check("main.py", False, repr(e))
 
