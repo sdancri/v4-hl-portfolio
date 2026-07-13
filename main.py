@@ -1799,27 +1799,32 @@ async def bootstrap() -> None:
                 # NU adoptam — continuam la urmatorul simbol
                 continue
 
-            # STRAT 2 — Refuz adopt daca SL e pe partea GRESITA (LONG sl>=entry /
-            # SHORT sl<=entry). Entry-ul valideaza geometria (validate_sl); adopt-ul
-            # nu o facea — un SL inversat (bug/interventie manuala/mis-read) s-ar
-            # declansa INSTANT la primul tick → pierdere silentioasa + Telegram
-            # misleading. NU enforc distanta [sl_min,sl_max] — SL live (ex trailing
-            # mutat) poate fi legitim in afara bounds. HALT simbolul — altfel
+            # STRAT 2 — Refuz adopt daca SL e pe partea GRESITA fata de PRETUL
+            # CURENT (last_close) — NU fata de entry. Comparatia cu entry
+            # refuza FALS orice pozitie profitabila cu breakeven/profit-lock
+            # stop (SL mutat LEGITIM la/peste entry pe un trade profitabil =
+            # mecanism de risc STANDARD) la ORICE redeploy. Pericolul real
+            # ("SL s-ar declansa instant") e SL pe partea gresita a pretului
+            # CURENT, nu a entry-ului. Skip check daca last_close=0 (fara
+            # warmup data). NU enforc distanta [sl_min,sl_max] — SL live poate
+            # fi legitim in afara bounds. HALT simbolul pe refuz — altfel
             # on_confirmed_bar ar STIVUI un trade nou peste pozitia neprotejata.
-            # (port din BP-HL 52230b6 — BP-HL avea deja halt-ul, portul initial
-            # V4-HL l-a omis; corectat acum, aliniat cu BP Bybit 8f404ca)
-            if (dir_real == "LONG" and sl_real >= entry_px) or \
-               (dir_real == "SHORT" and sl_real <= entry_px):
-                print(f"  [{sym}] resume: REFUZ ADOPT — SL geometrie GRESITA "
-                      f"(sl={sl_real} vs entry={entry_px}, dir={dir_real})")
+            # (port BP-HL 32a5cc9 — fix breakeven-false-positive peste 52230b6/8f404ca)
+            last_close = (float(sig.df.iloc[-1]["close"])
+                          if len(sig.df) else 0.0)
+            if last_close > 0 and (
+                    (dir_real == "LONG" and sl_real >= last_close) or
+                    (dir_real == "SHORT" and sl_real <= last_close)):
+                print(f"  [{sym}] resume: REFUZ ADOPT — SL instant-trigger "
+                      f"(sl={sl_real} vs pret_curent={last_close}, dir={dir_real})")
                 try:
                     await tg.send_warning(
-                        "SL PE PARTEA GREȘITĂ — refuz adoptie",
+                        "SL S-AR DECLANȘA INSTANT — refuz adoptie",
                         f"<b>Pe HL:</b> {tg.dir_emoji(dir_real)} {dir_real}  "
-                        f"<b>Entry:</b> <code>{ex.smart_price(entry_px)}</code>  "
+                        f"<b>Preț curent:</b> <code>{ex.smart_price(last_close)}</code>  "
                         f"<b>SL:</b> <code>{ex.smart_price(sl_real)}</code>\n"
-                        f"SL-ul e pe partea GREȘITĂ față de entry — s-ar declanșa "
-                        f"INSTANT la primul tick.\n"
+                        f"SL-ul e pe partea GREȘITĂ față de prețul curent — s-ar "
+                        f"declanșa INSTANT.\n"
                         f"\n"
                         f"<b>Acțiune:</b> verifică manual poziția pe HL, "
                         f"(corectează SL sau închide), apoi redeploy bot.\n"
