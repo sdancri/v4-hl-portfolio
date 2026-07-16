@@ -196,6 +196,38 @@ async def get_balance_usdc(user: Optional[str] = None) -> float:
     return perp_value + spot_usdc
 
 
+async def get_available_margin_usdc(user: Optional[str] = None) -> float:
+    """Margin DISPONIBILA (colateral LIBER), NU equity total — pt cap-ul de
+    sizing. Diferenta fata de get_balance_usdc (care da TOTAL): scade marginea
+    deja BLOCATA de pozitiile deschise (`totalMarginUsed`). Critic pe cont
+    PARTAJAT / multi-pair (V4-HL: BTC+TIA+NEAR pe ACELASI wallet) — daca alte
+    perechi tin deja margin, cap-ul pe TOTAL ar supra-dimensiona (0.95×total×lev
+    > ce poti chiar deschide) → order rejected / supra-levier. = perp_free
+    (accountValue - totalMarginUsed) + spot_free (total - hold). Fallback la
+    accountValue daca totalMarginUsed lipseste (degradare sigura la
+    comportamentul vechi). (port BP-HL df67f07)"""
+    addr = (user or HL_MAIN_ADDRESS or "").lower()
+    if not addr:
+        raise RuntimeError("HL_MAIN_ADDRESS not set")
+    perp_state = await _info({"type": "clearinghouseState", "user": addr})
+    ms = perp_state.get("marginSummary", {}) or {}
+    account_value = float(ms.get("accountValue", 0) or 0)
+    margin_used = float(ms.get("totalMarginUsed", 0) or 0)
+    perp_free = max(0.0, account_value - margin_used)
+    spot_free = 0.0
+    try:
+        spot_state = await _info({"type": "spotClearinghouseState", "user": addr})
+        for bal in (spot_state or {}).get("balances", []):
+            if (bal.get("coin") or "").upper() == "USDC":
+                total = float(bal.get("total", 0) or 0)
+                hold = float(bal.get("hold", 0) or 0)
+                spot_free = max(0.0, total - hold)
+                break
+    except Exception:
+        pass
+    return perp_free + spot_free
+
+
 async def get_balance_spot_usdc(user: Optional[str] = None) -> float:
     """
     Returneaza balanta SPOT USDC (separate de perps).
@@ -725,12 +757,18 @@ def _qty_prec(symbol: Optional[str] = None) -> int:
     return _INSTRUMENTS.get(_coin(symbol or "ETH"), {}).get("sz_decimals", 4)
 
 
-# get_balance — BP signature (no args), returneaza acelasi total ca get_balance_usdc
+# get_balance — BP signature (no args). Folosit DOAR pt cap-ul de sizing ->
+# intoarce MARGIN DISPONIBILA (nu equity total), ca sa nu supra-dimensioneze pe
+# cont partajat / multi-pair (BTC+TIA+NEAR pe ACELASI wallet) unde alte perechi
+# tin deja margin. (port BP-HL df67f07)
 async def get_balance() -> Optional[float]:
     """
-    Alias BP-compat — returneaza total USDC tradabil (perp + spot pe Unified).
-    Folosit DOAR pt cap-ul de siguranta din position_sizing la entry (NU
-    actualizeaza shared_equity — model compound local, vezi bot_state.py).
+    BP-compat — margin DISPONIBILA (colateral liber) pt cap-ul de siguranta din
+    position_sizing (0.95 × balance × LEVERAGE_MAX). NU total equity: marginea
+    blocata de alte perechi pe acelasi wallet e scazuta -> cap-ul reflecta ce
+    poti chiar deschide (vs get_balance_usdc care da TOTAL, pt diagnostic).
+    Equity-ul de pe chart ramane intern (state.account — model compound local,
+    vezi bot_state.py).
 
     Retry 4x/1s: un singur fail tranzitoriu (fara retry inainte) lasa cap-ul
     de siguranta sa cada pe fallback shared_equity (mai putin sigur — vezi
@@ -740,7 +778,7 @@ async def get_balance() -> Optional[float]:
     last_exc: Optional[Exception] = None
     for i in range(4):
         try:
-            return await get_balance_usdc()
+            return await get_available_margin_usdc()
         except Exception as e:
             last_exc = e
             print(f"[HL] get_balance attempt {i+1}/4 failed: {e!r}")

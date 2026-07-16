@@ -222,6 +222,7 @@ section("5. exchange_api surface")
 
 required = [
     "get_kline", "get_market_info", "get_balance", "get_balance_usdc",
+    "get_available_margin_usdc",
     "get_position", "fetch_open_position", "place_market",
     "place_limit_postonly", "cancel_order", "cancel_all_orders",
     "cancel_all_stops", "get_order_status", "set_leverage", "set_position_sl",
