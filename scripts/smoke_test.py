@@ -307,6 +307,67 @@ try:
 except Exception as e:
     check("BotState flow", False, repr(e))
 
+# Regression BP-HL 6ee1463: save() TREBUIE sa fie tot sub lock (build+write+
+# replace), altfel doua save() concurente (record_closed_trade/heartbeat/etc,
+# fiecare prin asyncio.to_thread → thread-uri diferite) se calca pe tmp-ul cu
+# nume fix → "save error" (ENOENT) si/sau stale-overwrite silentios pe disk.
+# Reproducere identica cu BP: 40 threads concurente → 0 erori, JSON final
+# valid, zero tmp orfan (pe codul VECHI: 15-19 erori pe reproducerea BP).
+try:
+    import os as _os
+    import json as _json
+    import shutil as _shutil
+    import threading as _threading
+    import core.bot_state as _bs
+
+    # DATA_DIR e constanta MODUL-LEVEL (citita o data la import, NU live din
+    # os.environ) — setarea os.environ["DATA_DIR"] dupa import n-ar avea NICIUN
+    # efect (capcana cunoscuta). Trebuie mutat direct atributul modulului.
+    _race_dir = "/tmp/smoke_save_race_test"
+    _shutil.rmtree(_race_dir, ignore_errors=True)
+    _os.makedirs(_race_dir, exist_ok=True)
+    _prev_data_dir = _bs.DATA_DIR
+    _bs.DATA_DIR = _race_dir
+
+    race_state = BotState(account_size=100.0)
+    save_errors = []
+    _orig_print = print
+
+    def _capture_print(*a, **kw):
+        msg = " ".join(str(x) for x in a)
+        if "save error" in msg:
+            save_errors.append(msg)
+        _orig_print(*a, **kw)
+
+    import builtins as _builtins
+    _builtins.print = _capture_print
+    try:
+        def _worker(i):
+            race_state.shared_equity = 100.0 + i
+            race_state.save()
+
+        threads = [_threading.Thread(target=_worker, args=(i,)) for i in range(40)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        _builtins.print = _orig_print
+
+    _tmp_path = race_state._state_path() + ".tmp"
+    _final_path = race_state._state_path()
+    check("save() concurent (40x) — zero erori", len(save_errors) == 0,
+          detail=f"got {len(save_errors)} save error(s)")
+    check("save() concurent — zero tmp orfan", not _os.path.exists(_tmp_path))
+    with open(_final_path, encoding="utf-8") as f:
+        _final_data = _json.load(f)
+    check("save() concurent — JSON final valid", "shared_equity" in _final_data)
+
+    _bs.DATA_DIR = _prev_data_dir
+    _shutil.rmtree(_race_dir, ignore_errors=True)
+except Exception as e:
+    check("save() concurrent race", False, repr(e))
+
 # ============================================================================
 # 7. no_lookahead
 # ============================================================================

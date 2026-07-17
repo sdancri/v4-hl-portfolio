@@ -315,6 +315,27 @@ class BotState:
         return os.path.join(DATA_DIR, "bot_state.json")
 
     def save(self) -> None:
+        """
+        Persista state-ul pe disk. Idempotent.
+
+        TOT sub lock (build payload + write + os.replace). Doua save() concurente
+        sunt normale aici (record_closed_trade / clear_active_position / synth
+        DESYNC / heartbeat pot declansa salvari aproape simultan, fiecare prin
+        asyncio.to_thread → thread-uri diferite). Cu write-ul in AFARA lock-ului
+        si un tmp cu nume FIX comun se calcau reciproc:
+          (a) ENOENT: A face os.replace si MUTA tmp-ul; B, care intre timp scrisese
+              in ACELASI tmp, gaseste tmp-ul disparut la propriul replace → eroare;
+          (b) STALE overwrite: B construise payload mai NOU, dar daca replace-ul lui
+              A (payload mai VECHI) ateriza ultimul, pe disk ramanea state VECHI →
+              la un crash/restart in fereastra aia se pierdea ultima mutatie (ex un
+              trade proaspat inchis).
+        Lock-ul serializeaza: cine intra ultimul are payload-ul cel mai proaspat SI
+        ateriza ultimul. `_lock` NU e reentrant, dar niciun caller nu-l tine cand
+        cheama save() (ar fi deadlock-uit deja pe `with` de build) → sigur de extins.
+        I/O sub lock = cateva ms pe un fisier mic, in thread pool (nu event loop).
+        NOTA: lock-ul e IN-PROCES. Doi boti pe ACELASI DATA_DIR ar cere file-lock —
+        nesuportat by design (fiecare bot are DATA_DIR propriu). (port BP-HL 6ee1463)
+        """
         path = self._state_path()
         if not path:
             return
@@ -335,13 +356,19 @@ class BotState:
                 "positions": {s: p.to_persist()
                               for s, p in self.positions.items() if p},
             }
-        try:
             tmp = path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-            os.replace(tmp, path)
-        except Exception as e:
-            print(f"  [STATE] save error: {e}")
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2)
+                os.replace(tmp, path)
+            except Exception as e:
+                print(f"  [STATE] save error: {e}")
+                # Nu lasa tmp orfan daca replace-ul a picat (write-ul a reusit).
+                try:
+                    if os.path.exists(tmp):
+                        os.remove(tmp)
+                except Exception:
+                    pass
 
     def load(self) -> None:
         path = self._state_path()
