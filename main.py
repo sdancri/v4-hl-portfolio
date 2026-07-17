@@ -348,10 +348,17 @@ async def open_position(symbol: str, direction: str, close_price: float,
         pair_cfg, _state.shared_equity, balance,
         CONFIG.portfolio, leverage=pair_cfg.leverage,
     )
-    if sizing.skip:
-        print(f"  [OPEN {symbol}] SKIP: {sizing.skip_reason}")
-        log_event("entry_skipped", symbol=symbol, reason=sizing.skip_reason)
-        return
+    # Cap pe margin disponibila (nu skip) — model BP qty_by_risk: pos_usd
+    # deja capat de compute_position_size daca cerea mai mult decat cap_usd.
+    # Intram cu pozitie MAI MICA, nu ratam trade-ul (risc dublu-lipsa daca alte
+    # perechi tin deja margin pe acelasi wallet — vezi incident live NEAR
+    # 2026-07-17: cerere $178 vs cap $81 disponibil, inainte se sarea complet).
+    if sizing.capped:
+        print(f"  [OPEN {symbol}] CAPPED: pos_usd ${sizing.pos_usd:,.2f} "
+              f"(cap ${sizing.cap_usd:,.2f} — margin limitata, alte perechi "
+              f"tin deja capital pe wallet)")
+        log_event("entry_capped", symbol=symbol, pos_usd=sizing.pos_usd,
+                  cap_usd=sizing.cap_usd)
 
     info = await ex.get_market_info(symbol)
     qty_raw = sizing.pos_usd / close_price
@@ -438,6 +445,9 @@ async def open_position(symbol: str, direction: str, close_price: float,
     fill_emoji = {"maker": "🟢", "mixed": "🟡", "taker": "🔴"}.get(fill_kind, "⚪")
     tp_section = (f"🎯 <b>Take Profit:</b> <code>{ex.smart_price(tp_price)}</code>  "
                  f"<i>(Market atomic)</i>\n\n" if tp_price else "")
+    capped_line = (f"⚠️ <i>Poziție CAPATĂ — margin limitată "
+                   f"(alte perechi rulează pe același wallet)</i>\n"
+                   if sizing.capped else "")
     await tg.send(
         f"🚀 INTRARE: {direction} {tg.dir_emoji(direction)}",
         f"<b>Fill:</b>     {fill_emoji} <code>{fill_kind}</code>\n"
@@ -447,6 +457,7 @@ async def open_position(symbol: str, direction: str, close_price: float,
         f"<b>Risk:</b>     <code>${sizing.risk_usd:,.2f}</code>  "
         f"(<code>{pair_cfg.risk_pct_per_trade*100:.0f}%</code> × "
         f"<code>${_state.shared_equity:,.2f}</code>)\n"
+        f"{capped_line}"
         f"\n"
         f"{tp_section}"
         f"🛑 <b>Stop Loss:</b>   <code>{ex.smart_price(sl_price)}</code>  "

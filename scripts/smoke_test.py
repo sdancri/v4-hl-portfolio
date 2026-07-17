@@ -198,20 +198,36 @@ try:
     # HI foloseste sl_initial_pct (vezi compute_position_size).
     expected_pos_usd = (100.0 * pair_cfg.risk_pct_per_trade) / pair_cfg.effective_sl_pct
     cap_usd = cfg1.portfolio.cap_pct_of_max * 100.0 * cfg1.portfolio.leverage_max
-    # pos_usd should be at most expected_pos_usd; if > cap_usd, sizing.skip=True
-    if sizing.skip:
-        check("position_sizing skip flag", sizing.pos_usd > cap_usd,
-              detail=f"skip={sizing.skip_reason}")
-    else:
-        check("compute_position_size pos_usd",
-              abs(sizing.pos_usd - expected_pos_usd) < 0.01,
-              detail=f"got {sizing.pos_usd:.2f} expected {expected_pos_usd:.2f}")
+    check("compute_position_size pos_usd (necapat, balance normal)",
+          abs(sizing.pos_usd - expected_pos_usd) < 0.01,
+          detail=f"got {sizing.pos_usd:.2f} expected {expected_pos_usd:.2f}")
+    check("capped=False cand pos_usd < cap_usd", sizing.capped is False)
     check("risk_usd = 10%",
           abs(sizing.risk_usd - 10.0) < 0.01,
           detail=f"got {sizing.risk_usd:.2f}")
     check("cap_usd = $475 (0.95*100*5)",
           abs(sizing.cap_usd - 475.0) < 0.01,
           detail=f"got {sizing.cap_usd:.2f}")
+
+    # Regression incident live NEAR 2026-07-17: cand pos_usd cerut depaseste
+    # cap_usd (margin limitata — alte perechi tin deja capital pe acelasi
+    # wallet), botul TREBUIE sa CAPEZE pozitia (model BP qty_by_risk:
+    # min(notional, cap)), NU sa sara peste trade. Exact scenariul real: BTC+
+    # TIA deja deschise consumasera margin, NEAR a fost respins complet in loc
+    # sa intre mai mic. Balance mic (1.0) forteaza cap_usd sub pos_usd dorit.
+    sizing_capped = compute_position_size(pair_cfg, shared_equity=100.0,
+                                          balance_broker=1.0,
+                                          portfolio_cfg=cfg1.portfolio,
+                                          leverage=pair_cfg.leverage)
+    expected_cap = cfg1.portfolio.cap_pct_of_max * 1.0 * cfg1.portfolio.leverage_max
+    check("capped=True cand pos_usd > cap_usd (nu skip)",
+          sizing_capped.capped is True)
+    check("pos_usd == cap_usd cand capat (min(), nu skip)",
+          abs(sizing_capped.pos_usd - expected_cap) < 0.01,
+          detail=f"got {sizing_capped.pos_usd:.4f} expected {expected_cap:.4f}")
+    check("risk_usd recalculat proportional pe pozitia capata",
+          sizing_capped.risk_usd < 10.0,
+          detail=f"got {sizing_capped.risk_usd:.4f} (expected < 10.0, risc redus)")
 except Exception as e:
     check("position_sizing", False, repr(e))
 
